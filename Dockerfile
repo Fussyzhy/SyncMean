@@ -2,6 +2,8 @@
 # 纯 Node + Express + Socket.IO，无构建步骤、无数据库、房间数据在内存里。
 FROM node:22-alpine
 
+RUN npm config set registry https://registry.npmmirror.com
+
 WORKDIR /app
 
 # 端口由应用自己从 PORT 读取（server.js: process.env.PORT || 3210）
