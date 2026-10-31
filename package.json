@@ -1,0 +1,24 @@
+{
+  "name": "tongshengchuanyi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "同声传意 · 双人联机小游戏",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node tools/sim.js",
+    "sim": "node tools/sim.js",
+    "verify:ui": "node .verify/ui-e2e.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.7.5"
+  }
+}

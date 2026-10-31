@@ -1,0 +1,4 @@
+node_modules/
+.verify/shots/
+*.log
+.DS_Store
