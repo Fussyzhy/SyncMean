@@ -32,12 +32,15 @@ public/index.html  单页四视图（首页 / 房间 / 对局 / 结算）
 public/style.css
 public/app.js
 .verify/ui-e2e.js  真浏览器验收（Lead 维护）
+Dockerfile         生产镜像（node:22-alpine，仅生产依赖，非 root，内置 /health 探活）
+.dockerignore
+docker-compose.yml 单实例编排（房间在内存，禁止扩副本）
 ```
 
 **写入边界**：
 - 后端只改 `server.js`、`src/game.js`、`tools/sim.js`。
 - 前端只改 `public/**`。
-- `package.json`、`PROTOCOL.md`、`README.md`、`.verify/**` 由 Lead 维护，前后端均不得改。
+- `package.json`、`PROTOCOL.md`、`README.md`、`.verify/**`、`Dockerfile`、`.dockerignore`、`docker-compose.yml` 由 Lead 维护，前后端均不得改。
 
 ## 2. 运行
 

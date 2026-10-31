@@ -1,0 +1,24 @@
+# 依赖：容器里重新装（宿主机的 node_modules 含 Windows 平台二进制，不能直接拷进去）
+node_modules
+npm-debug.log*
+
+# 测试与验收产物（不进运行时镜像）
+tools
+.verify
+
+# 版本库 / 编辑器 / 本地环境
+.git
+.gitignore
+.env
+.env.*
+*.log
+.DS_Store
+.vscode
+.idea
+
+# 文档与镜像构建自身
+README.md
+PROTOCOL.md
+Dockerfile
+docker-compose.yml
+.dockerignore

@@ -58,15 +58,98 @@ npm test
 
 `tools/sim.js` 会自己拉起一个临时服务（不占用 3210），用两个 socket 客户端跑：建房 → 加入 → 双方准备 → 倒计时 → 双盲提交 → 揭晓 → 同意词投票 → 下一轮 → 通关 → 再来一局 → 断线重连，并断言「对方提交前拿不到对方的词」以及同意词链路的全部状态。
 
-## 部署到公网（可选）
+## 用 Docker 部署（推荐）
+
+镜像定义见仓库根目录的 `Dockerfile`（基于 `node:22-alpine`，只装生产依赖，非 root 用户运行，内置 `/health` 探活）。
+
+### 1. 在服务器上构建并启动
+
+服务器装好 Docker 后，把项目放上去（`git clone` 或 `scp`），然后：
+
+```bash
+cd tongshengchuanyi
+docker build -t tongshengchuanyi:latest .
+docker run -d --name tongshengchuanyi \
+  --restart unless-stopped \
+  -p 3210:3210 \
+  tongshengchuanyi:latest
+```
+
+确认起来了：
+
+```bash
+curl -s http://127.0.0.1:3210/health   # {"ok":true,"rooms":0}
+docker ps                              # STATUS 里应出现 (healthy)
+docker logs -f tongshengchuanyi        # [同声传意] 服务已启动：http://localhost:3210
+```
+
+> 如果你在自己电脑上（Windows/macOS）构建、再推到 Linux 服务器，记得指定平台：
+> `docker buildx build --platform linux/amd64 -t 你的仓库/tongshengchuanyi:v1 .`
+
+### 2. 用 docker compose（推荐，配置写在文件里）
+
+```bash
+docker compose up -d --build   # 构建并后台启动
+docker compose logs -f         # 看日志
+docker compose down            # 停止并移除
+```
+
+### 3. 对外暴露
+
+- 小规模可以直接开防火墙端口访问 `http://服务器IP:3210`；
+- 更推荐前面挂 Nginx / Caddy 做 80/443 + HTTPS。此时容器端口只绑本机即可：
+  `-p 127.0.0.1:3210:3210`，或把 compose 里的 ports 改成 `"127.0.0.1:3210:3210"`。
+
+**Socket.IO 必须让反代透传 WebSocket 升级**，否则会退化成轮询甚至连不上。Nginx 关键三行：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3210;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 7d;   # WebSocket 长连接，别用默认 60s 被掐断
+}
+```
+
+Caddy 更省事（自动 HTTPS，WebSocket 默认就支持）：
+
+```
+game.example.com {
+    reverse_proxy 127.0.0.1:3210
+}
+```
+
+### 4. 必须知道的两个限制
+
+1. **只能跑 1 个副本。** 房间数据全在进程内存里（`src/game.js` 的 `Map`），多副本/负载均衡会把同一房间的两个人分到不同进程，直接玩不了。要横向扩容得先加 `@socket.io/redis-adapter` + Redis + sticky session，本项目暂未做。
+2. **重启容器 = 清空所有房间**，正在进行的对局会断。更新选在人少的时候，玩家刷新页面重开一局即可（无数据库，也不需要挂数据卷）。
+
+### 5. 更新版本
+
+```bash
+git pull
+docker compose up -d --build   # 或重新 docker build + docker rm -f 旧容器
+```
+
+### 6. 国内构建 npm 慢的话
+
+在 `Dockerfile` 的 `RUN npm ci` 前加一行换源：
+
+```dockerfile
+RUN npm config set registry https://registry.npmmirror.com
+```
+
+### 7. 不想用 Docker
 
 单进程、无数据库、无构建步骤，任意能跑 Node 18+ 的机器都行：
 
 ```bash
 PORT=8080 npm start
 ```
-
-推荐用 Nginx / Caddy 反代并开启 WebSocket 升级（Socket.IO 需要），或直接用内网穿透工具把 3210 暴露出去。房间数据在内存里，重启即清空，够用即可。
 
 ## 可扩展方向
 
