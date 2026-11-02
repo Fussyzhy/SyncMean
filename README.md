@@ -98,11 +98,11 @@ yarn verify:ui     # 真浏览器验收：需先 yarn build && yarn start（Edge
 ### 1. 构建并启动
 
 ```bash
-docker build -t tongshengchuanyi:latest .
-docker run -d --name tongshengchuanyi \
+docker build -t syncmean:latest .
+docker run -d --name syncmean \
   --restart unless-stopped \
   -p 3210:3210 \
-  tongshengchuanyi:latest
+  syncmean:latest
 ```
 
 确认起来了：
@@ -110,11 +110,11 @@ docker run -d --name tongshengchuanyi \
 ```bash
 curl -s http://127.0.0.1:3210/health   # {"ok":true,"rooms":0}
 docker ps                              # STATUS 里应出现 (healthy)
-docker logs -f tongshengchuanyi        # [同声传意] 服务已启动：http://localhost:3210
+docker logs -f syncmean                # [同声传意] 服务已启动：http://localhost:3210
 ```
 
 > 如果你在自己电脑上（Windows/macOS）构建、再推到 Linux 服务器，记得指定平台：
-> `docker buildx build --platform linux/amd64 -t 你的仓库/tongshengchuanyi:v1 .`
+> `docker buildx build --platform linux/amd64 -t 你的仓库/syncmean:v1 .`
 
 ### 2. 用 docker compose（推荐，配置写在文件里）
 
@@ -168,7 +168,7 @@ docker compose up -d --build   # 或重新 docker build + docker rm -f 旧容器
 ### 6. 国内构建 yarn 慢的话
 
 ```bash
-docker build --build-arg YARN_REGISTRY=https://registry.npmmirror.com -t tongshengchuanyi:latest .
+docker build --build-arg YARN_REGISTRY=https://registry.npmmirror.com -t syncmean:latest .
 ```
 
 ### 7. 不想用 Docker

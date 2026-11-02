@@ -67,7 +67,7 @@ export function triggerDownload(href: string, fileName: string): boolean {
   try {
     anchor = document.createElement('a');
     anchor.href = href;
-    anchor.download = fileName || 'tongshengchuanyi.png';
+    anchor.download = fileName || 'SyncMean.png';
     anchor.rel = 'noopener';
     anchor.style.position = 'fixed';
     anchor.style.left = '-2000px';

@@ -6,8 +6,8 @@ services:
       args:
         # 国内构建慢可改成 https://registry.npmmirror.com
         YARN_REGISTRY: https://registry.npmjs.org
-    image: tongshengchuanyi:latest
-    container_name: tongshengchuanyi
+    image: syncmean:latest
+    container_name: syncmean
     restart: unless-stopped
     ports:
       # 只给反代/本机访问时改成 "127.0.0.1:3210:3210"
