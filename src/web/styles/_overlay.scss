@@ -1,0 +1,160 @@
+// =============================================================================
+// 覆盖层：3-2-1 倒计时、toast、断网横幅、音效开关、撒花
+// 对应 public/style.css 第 1288–1464 行
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+// ---- 倒计时遮罩 ----
+.countdown {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: none;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(16, 34, 58, 0.78), rgba(4, 8, 16, 0.95));
+  @include frosted(9px);
+
+  &.is-on {
+    display: grid;
+  }
+
+  &__inner {
+    text-align: center;
+    padding: 0 24px;
+  }
+
+  &__num {
+    font-size: clamp(104px, 34vw, 168px);
+    font-weight: 900;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    @include gradient-text($grad-count, 0 16px 48px rgba($cyan, 0.32));
+
+    // 每秒重放的弹跳（由 JS 重新挂 class 触发）
+    &--pulse {
+      animation: countPop 0.92s cubic-bezier(0.2, 0.9, 0.2, 1);
+    }
+  }
+
+  &__sub {
+    margin: 12px 0 0;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+}
+
+// ---- 轻提示 ----
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  z-index: 100;
+  width: max-content;
+  max-width: min(86vw, 420px);
+  padding: 12px 20px;
+  border-radius: $radius-pill;
+  border: 1px solid var(--line-strong);
+  background: rgba(10, 18, 32, 0.94);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  box-shadow: 0 20px 44px -18px rgba(0, 0, 0, 0.95);
+  @include frosted(10px);
+  opacity: 0;
+  transform: translate(-50%, 18px);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+
+  &.is-on {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  // useToast()/app.js 会按 NoticeKind 追加 toast--join/leave/info/system；
+  // 旧样式没有单独配色（沿用基础视觉），这里显式承接全部四种 kind，
+  // 避免 Vue 侧按 kind 拼接 class 时出现「未覆盖」的空档。
+  &--system,
+  &--info,
+  &--join,
+  &--leave {
+    color: var(--text);
+  }
+}
+
+// ---- 断网横幅 ----
+.net {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 90;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 14px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  color: $ink-warn;
+  background: linear-gradient(90deg, $warn, $warn-soft);
+  transform: translateY(-100%);
+  transition: transform 0.24s ease;
+
+  &.is-on {
+    transform: none;
+  }
+}
+
+// ---- 音效开关 ----
+.sound {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(16px, calc(50% - 296px));
+  z-index: 70;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: rgba(9, 17, 30, 0.78);
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  @include frosted(10px);
+  transition: transform 0.15s ease, border-color 0.2s ease;
+  touch-action: manipulation;
+
+  &:active {
+    transform: scale(0.94);
+  }
+
+  &:focus-visible {
+    @include focus-ring();
+  }
+}
+
+// ---- 撒花容器与碎片 ----
+.confetti {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.confetti-piece {
+  position: absolute;
+  top: -16px;
+  border-radius: 2px;
+  opacity: 0.95;
+  animation-name: confettiFall;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+  will-change: transform;
+}

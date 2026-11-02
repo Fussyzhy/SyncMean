@@ -1,0 +1,107 @@
+// =============================================================================
+// 首页：品牌区、分割线、玩法三步、免责小字
+// 对应 public/style.css 第 312–413 行
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+.brand {
+  text-align: center;
+  padding: 4px 0 6px;
+
+  &__kicker {
+    display: inline-block;
+    margin: 0 0 12px;
+    padding: 5px 12px;
+    border-radius: $radius-pill;
+    border: 1px solid rgba($lime, 0.28);
+    background: rgba($lime, 0.08);
+    color: var(--lime);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+  }
+
+  &__title {
+    margin: 0;
+    font-size: clamp(38px, 12vw, 56px);
+    line-height: 1.02;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+  }
+
+  // 渐变品牌字（含霓虹投影）
+  &__num {
+    @include gradient-text($grad-brand, 0 8px 26px rgba($cyan, 0.28));
+  }
+
+  &__sub {
+    margin: 14px auto 0;
+    max-width: 330px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.65;
+  }
+}
+
+// 「或者加入朋友的房间」分割线
+.or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--dim);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+
+  &::before,
+  &::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+}
+
+.fineprint {
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+// ---- 玩法三步 ----
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 4px;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+  border-radius: $radius-chip;
+  border: 1px dashed $line-faint;
+
+  &__n {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--cyan);
+    background: rgba($cyan, 0.1);
+    border: 1px solid rgba($cyan, 0.25);
+  }
+}

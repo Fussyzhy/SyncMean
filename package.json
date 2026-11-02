@@ -1,24 +1,41 @@
 {
   "name": "tongshengchuanyi",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "同声传意 · 双人联机小游戏",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js",
-    "test": "node tools/sim.js",
-    "sim": "node tools/sim.js",
-    "verify:ui": "node .verify/ui-e2e.js"
-  },
+  "type": "module",
+  "description": "同声传意 · 双人联机小游戏（TypeScript + Vue 3 + Sass）",
+  "main": "dist/server/index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,magenta \"yarn dev:server\" \"yarn dev:web\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "yarn build:web && yarn build:server",
+    "build:web": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && vue-tsc --noEmit -p tsconfig.app.json && tsc -p tsconfig.tests.json --noEmit",
+    "test": "tsx tools/sim.ts",
+    "sim": "tsx tools/sim.ts",
+    "verify:ui": "tsx .verify/ui-e2e.ts"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "socket.io-client": "^4.7.5"
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.0",
+    "sass": "^1.83.0",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.2.0"
   }
 }

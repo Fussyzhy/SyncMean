@@ -1,0 +1,24 @@
+// =============================================================================
+// 同声传意 · 样式入口（Vue 3 + Sass）
+//
+// 由 public/style.css（1524 行，只读迁移蓝本）拆分为真实 Sass 分片：
+//   - SCSS 变量 / @mixin / BEM 嵌套 / @each 生成徽章变体；
+//   - 分片统一用 @use 汇总（禁止 @import），加载顺序即旧 CSS 的源码顺序，
+//     保证同特异性选择器的层叠结果不变；
+//   - :root 的 CSS 自定义属性全部保留，运行时可覆盖性不变。
+// =============================================================================
+
+@use 'variables';   // :root 主题 token（统一输出在最前）
+@use 'mixins';      // 自定义 mixin 集（本身不产出 CSS）
+@use 'reset';       // 盒模型 / body 底色 / 网格纹理 / 选区
+@use 'base';        // 显隐工具 / 玻璃卡片 / 字段 / 输入框 / 行布局
+@use 'layout';      // .app 容器 / 视图切换 / 顶栏
+@use 'buttons';     // .btn 及变体 / 忙态 spinner / .btn-exit
+@use 'home';        // 首页：品牌区 / 分割线 / 玩法三步
+@use 'room';        // 房间页：房间码 / 玩家 / 徽章 / 提示
+@use 'game';        // 对局页：依据卡 / 提交面板 / 进度条
+@use 'reveal';      // 揭晓：翻牌 / 判词 / 同意词投票
+@use 'settle';      // 结算页：逐轮记录 / 统计 / 操作区 / 历史
+@use 'overlay';     // 覆盖层：倒计时 / toast / 断网 / 音效 / 撒花
+@use 'animations';  // 全部 @keyframes
+@use 'responsive';  // 359px / 600px / reduced-motion 媒体查询

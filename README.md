@@ -1,15 +1,30 @@
-# 同声传意 · 联机版
+# 同声传意 · 联机版（TypeScript + Vue 3）
 
 > 两个人各自想一个词，喊「3！2！1！」同时说出来；不一样就一起基于这两个词再联想——直到说出一模一样的词，或者双方都点头「这俩算同意词」。
+
+## 技术栈
+
+| 层 | 选型 |
+|---|---|
+| 后端 | Node.js ≥ 20.19、Express 4、Socket.IO 4、**TypeScript**（ESM，`tsc` 编译到 `dist/server`） |
+| 前端 | **Vue 3** SFC（`<script setup lang="ts">`）+ **Vite 6** + **TypeScript** + **Sass**（构建到 `dist/public`） |
+| 测试 | `tsx` 直跑 `tools/sim.ts`（端到端）；`.verify/ui-e2e.ts`（Edge headless + CDP 真浏览器验收） |
+| 包管理 | **Yarn 1.22**（`yarn.lock`） |
+
+运行期只有一个 Node 进程、一个端口；房间数据全在内存，无数据库、无外部服务。
 
 ## 快速开始
 
 ```bash
-npm install
-npm start
-```
+yarn install
 
-打开 <http://localhost:3210>。
+# 开发模式：后端 tsx watch(3210) + Vite dev server(5173)，/socket.io 自动代理
+yarn dev
+
+# 生产模式：构建前端+后端，然后单进程托管
+yarn build
+yarn start          # 打开 http://localhost:3210
+```
 
 - 第一个人填昵称 → **创建房间**，把房间里的大号房间码（或「复制邀请链接」）发给朋友。
 - 第二个人打开链接（或输入房间码）→ **加入房间**。
@@ -43,31 +58,46 @@ npm start
 ## 目录结构
 
 ```
-server.js           Express + Socket.IO 服务（静态资源 + 房间事件接线）
-src/game.js         房间与对局状态机（与 socket 解耦）
-tools/sim.js        端到端测试：两个模拟客户端跑完整对局
-public/             前端四视图（首页 / 房间 / 对局 / 结算）
-PROTOCOL.md         前后端事件契约（唯一事实来源）
+src/
+  server/index.ts     Express + Socket.IO 装配（静态资源 + socket 事件接线）
+  server/game.ts      房间与对局状态机（与 socket 解耦，注入式传输层）
+  shared/protocol.ts  前后端共享的协议类型（PROTOCOL.md 的 TypeScript 映射）
+  web/                Vue 3 前端
+    index.html        Vite 入口
+    main.ts / App.vue 应用入口与视图切换
+    components/       四视图 + 对局子面板 + 全局层（toast/倒计时/撒花/音效）
+    composables/      socket / 会话状态 / 音效 / 倒计时 / 撒花
+    lib/              Canvas 导出海报、下载、存储、剪贴板、格式化
+    styles/           Sass 分片（variables/mixins/base/buttons/views/animations…）
+tools/sim.ts          端到端自测：两个模拟客户端跑完整对局
+.verify/ui-e2e.ts     真浏览器验收（Edge headless + CDP，零第三方依赖）
+vite.config.ts        前端构建配置（root=src/web → dist/public，dev 代理 /socket.io）
+tsconfig.json         基础编译配置
+tsconfig.server.json  后端（NodeNext → dist/server）
+tsconfig.app.json     前端（Bundler + vue-tsc）
+tsconfig.tests.json   测试与验收脚本
+PROTOCOL.md           前后端事件契约（唯一事实来源）
 ```
 
-## 测试
+## 测试与验收
 
 ```bash
-npm test
+yarn test          # tools/sim.ts：自起临时服务（3299，不占 3210）跑完整对局
+yarn typecheck     # tsc(server) + vue-tsc(app) + tsc(tests) 三套类型检查
+yarn verify:ui     # 真浏览器验收：需先 yarn build && yarn start（Edge headless + CDP）
 ```
 
-`tools/sim.js` 会自己拉起一个临时服务（不占用 3210），用两个 socket 客户端跑：建房 → 加入 → 双方准备 → 倒计时 → 双盲提交 → 揭晓 → 同意词投票 → 下一轮 → 通关 → 再来一局 → 断线重连，并断言「对方提交前拿不到对方的词」以及同意词链路的全部状态。
+`tools/sim.ts` 会自己拉起一个临时服务，用两个 socket 客户端跑：建房 → 加入 → 双方准备 → 倒计时 → 双盲提交 → 揭晓 → 同意词投票 → 下一轮 → 通关 → 再来一局 → 断线重连，并断言「对方提交前拿不到对方的词」以及同意词链路的全部状态。
+
+`.verify/ui-e2e.ts` 用 CDP 驱动真实 Edge 跑完整双人对局，覆盖：双盲、同意词投票冻结、结算导出 PNG、结算页各自退出、准备按钮 loading 残留回归、手机 375px 布局，截图落在 `.verify/shots/`。
 
 ## 用 Docker 部署（推荐）
 
-镜像定义见仓库根目录的 `Dockerfile`（基于 `node:22-alpine`，只装生产依赖，非 root 用户运行，内置 `/health` 探活）。
+镜像定义见 `Dockerfile`（多阶段：builder 用 `yarn build` 产出 `dist/`，runtime 只装生产依赖、非 root 运行、内置 `/health` 探活）。
 
-### 1. 在服务器上构建并启动
-
-服务器装好 Docker 后，把项目放上去（`git clone` 或 `scp`），然后：
+### 1. 构建并启动
 
 ```bash
-cd tongshengchuanyi
 docker build -t tongshengchuanyi:latest .
 docker run -d --name tongshengchuanyi \
   --restart unless-stopped \
@@ -100,7 +130,7 @@ docker compose down            # 停止并移除
 - 更推荐前面挂 Nginx / Caddy 做 80/443 + HTTPS。此时容器端口只绑本机即可：
   `-p 127.0.0.1:3210:3210`，或把 compose 里的 ports 改成 `"127.0.0.1:3210:3210"`。
 
-**Socket.IO 必须让反代透传 WebSocket 升级**，否则会退化成轮询甚至连不上。Nginx 关键三行：
+**Socket.IO 必须让反代透传 WebSocket 升级**，否则会退化成轮询甚至连不上。Nginx 关键几行：
 
 ```nginx
 location / {
@@ -125,7 +155,7 @@ game.example.com {
 
 ### 4. 必须知道的两个限制
 
-1. **只能跑 1 个副本。** 房间数据全在进程内存里（`src/game.js` 的 `Map`），多副本/负载均衡会把同一房间的两个人分到不同进程，直接玩不了。要横向扩容得先加 `@socket.io/redis-adapter` + Redis + sticky session，本项目暂未做。
+1. **只能跑 1 个副本。** 房间数据全在进程内存里（`src/server/game.ts` 的 `Map`），多副本/负载均衡会把同一房间的两个人分到不同进程，直接玩不了。要横向扩容得先加 `@socket.io/redis-adapter` + Redis + sticky session，本项目暂未做。
 2. **重启容器 = 清空所有房间**，正在进行的对局会断。更新选在人少的时候，玩家刷新页面重开一局即可（无数据库，也不需要挂数据卷）。
 
 ### 5. 更新版本
@@ -135,20 +165,20 @@ git pull
 docker compose up -d --build   # 或重新 docker build + docker rm -f 旧容器
 ```
 
-### 6. 国内构建 npm 慢的话
+### 6. 国内构建 yarn 慢的话
 
-在 `Dockerfile` 的 `RUN npm ci` 前加一行换源：
-
-```dockerfile
-RUN npm config set registry https://registry.npmmirror.com
+```bash
+docker build --build-arg YARN_REGISTRY=https://registry.npmmirror.com -t tongshengchuanyi:latest .
 ```
 
 ### 7. 不想用 Docker
 
-单进程、无数据库、无构建步骤，任意能跑 Node 18+ 的机器都行：
+单进程、无数据库，任意能跑 Node 20.19+ 的机器都行：
 
 ```bash
-PORT=8080 npm start
+yarn install
+yarn build
+PORT=8080 yarn start
 ```
 
 ## 可扩展方向

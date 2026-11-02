@@ -1,0 +1,84 @@
+// =============================================================================
+// 全部 @keyframes（名称必须与旧样式一致，JS 会按名字快速切换/重放）
+// =============================================================================
+
+// 视图/面板淡入上移
+@keyframes viewIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+// 忙态转圈
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+// 揭晓翻牌
+@keyframes cardFlip {
+  from {
+    transform: rotateY(88deg) scale(0.9);
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+// 判词弹出
+@keyframes verdictPop {
+  0% {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+// 倒计时数字弹跳
+@keyframes countPop {
+  0% {
+    transform: scale(0.55);
+    opacity: 0;
+  }
+  35% {
+    opacity: 1;
+  }
+  58% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+// 撒花飘落（--dx / --rot 由 JS 逐片设置）
+@keyframes confettiFall {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(var(--dx, 0px), 106vh, 0) rotate(var(--rot, 180deg));
+    opacity: 0.85;
+  }
+}

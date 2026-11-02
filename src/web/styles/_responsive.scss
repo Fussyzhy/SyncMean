@@ -1,0 +1,66 @@
+// =============================================================================
+// 响应式与可达性：超窄手机（≤359px）、桌面（≥600px）、减弱动效
+// 对应 public/style.css 第 1466–1524 行
+// 说明：旧样式的手机断点实际写的是 359px（任务书中提到的 375px 作为通用 token
+// 保留在 _variables.scss 的 $bp-mobile，不额外新增断点以免改变 360–375px 视觉）。
+// =============================================================================
+
+@use 'variables' as *;
+
+@media (max-width: $bp-mobile-s) {
+  .app {
+    width: calc(100% - 24px);
+    padding-top: 60px;
+  }
+
+  .card {
+    padding: 16px;
+  }
+
+  .players {
+    gap: 8px;
+  }
+
+  .player {
+    padding: 14px 6px 12px;
+  }
+
+  .input--code {
+    letter-spacing: 0.2em;
+    padding-left: calc(16px + 0.2em);
+  }
+
+  .row .btn {
+    min-width: 76px;
+    padding: 0 14px;
+  }
+
+  .history__words {
+    max-width: 110px;
+  }
+}
+
+@media (min-width: $bp-tablet) {
+  .app {
+    padding-top: 72px;
+  }
+
+  .card {
+    padding: 24px;
+  }
+
+  .brand__sub {
+    max-width: 380px;
+    font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

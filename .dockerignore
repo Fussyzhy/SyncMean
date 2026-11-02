@@ -1,24 +1,24 @@
-# 依赖：容器里重新装（宿主机的 node_modules 含 Windows 平台二进制，不能直接拷进去）
+# 依赖：镜像里用 yarn 重新装（宿主机 node_modules 含 Windows 二进制，不能拷进 Linux 镜像）
 node_modules
-npm-debug.log*
 
-# 测试与验收产物（不进运行时镜像）
+# 构建产物：镜像内由 yarn build 生成
+dist
+
+# 测试 / 验收 / 版本库 / 编辑器：不进运行时镜像
 tools
 .verify
-
-# 版本库 / 编辑器 / 本地环境
 .git
 .gitignore
 .env
 .env.*
 *.log
+*.tsbuildinfo
 .DS_Store
 .vscode
 .idea
 
-# 文档与镜像构建自身
+# 文档与编排文件本身
 README.md
 PROTOCOL.md
-Dockerfile
 docker-compose.yml
 .dockerignore

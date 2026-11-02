@@ -1,0 +1,53 @@
+// =============================================================================
+// Reset / 全局底噪：盒模型、html/body 底色、网格纹理、选区
+// 对应 public/style.css 第 28–72 行
+// =============================================================================
+
+@use 'variables' as *;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  font-family: var(--font);
+  color: var(--text);
+  overflow-x: hidden;
+  background-color: var(--bg-0);
+  background-image:
+    radial-gradient(120% 75% at 10% -10%, rgba($cyan, 0.18), transparent 62%),
+    radial-gradient(90% 60% at 102% -2%, rgba($lime, 0.12), transparent 58%),
+    radial-gradient(130% 90% at 50% 118%, rgba($indigo, 0.2), transparent 62%),
+    linear-gradient(180deg, $bg-0 0%, $bg-mid 52%, $bg-deep 100%);
+  background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
+}
+
+// 细网格纹理 + 顶部径向遮罩
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba($white, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba($white, 0.022) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(circle at 50% 20%, #000 0%, transparent 78%);
+  -webkit-mask-image: radial-gradient(circle at 50% 20%, #000 0%, transparent 78%);
+}
+
+::selection {
+  background: rgba($cyan, 0.35);
+  color: $ink-selection;
+}

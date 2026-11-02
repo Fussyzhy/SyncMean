@@ -1,6 +1,11 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内构建慢可改成 https://registry.npmmirror.com
+        YARN_REGISTRY: https://registry.npmjs.org
     image: tongshengchuanyi:latest
     container_name: tongshengchuanyi
     restart: unless-stopped

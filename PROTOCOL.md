@@ -1,6 +1,13 @@
-# 同声传意 · 联机版 —— 协议契约 v2（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3 变更（相对 v2）**：技术栈升级，**协议本身零变化**——事件名、字段名、错误码、DOM id、状态机语义全部保持 v2。变化只在工程层：
+> 1. 全部源码改为 TypeScript（ESM），后端 `tsc` 编译到 `dist/server`；
+> 2. 前端由原生 JS 重写为 Vue 3 SFC（`<script setup lang="ts">`）+ Vite 构建到 `dist/public`；
+> 3. 样式由纯 CSS 改为 Sass/SCSS（视觉 1:1 不变）；
+> 4. 包管理器由 npm 换成 Yarn 1.22（`yarn.lock`，命令见 §2）。
+> 5. 前后端共享的协议类型集中在 `src/shared/protocol.ts`（本文件的 TypeScript 映射，不得与本文档冲突）。
 >
 > **v2 变更（相对 v1）**：
 > 1. 项目名从「321 联想词」改为「**同声传意**」（仅文案/标题/日志前缀；事件名、字段名、DOM id、端口一律不变）。
@@ -20,37 +27,50 @@
 
 ## 1. 技术栈与目录
 
-- Node.js ≥ 18，Express 4 + Socket.IO 4，CommonJS（`require`）。
-- 前端纯 HTML/CSS/JS，**不引入任何 CDN 资源**（离线可跑）。Socket.IO 客户端用服务端自动提供的 `/socket.io/socket.io.js`。
+- Node.js ≥ 20.19，Express 4 + Socket.IO 4，**TypeScript（ESM）**，后端用 `tsc` 编译到 `dist/server`。
+- 前端 **Vue 3 SFC + TypeScript + Sass**，Vite 6 构建到 `dist/public`，由后端同进程静态托管；**不引入任何 CDN 资源**（离线可跑）。Socket.IO 客户端用服务端自动提供的 `/socket.io/socket.io.js`。
+- 共享协议类型在 `src/shared/protocol.ts`（前后端唯一类型来源，形状严格等于本文件的 §5.3/§5.1）。
 - 图片导出用浏览器原生 Canvas 2D，**不得引入任何第三方绘图库**。
+- 包管理器 **Yarn 1.22**（`yarn.lock`；不再有 `package-lock.json`）。
 
 ```
-server.js          Express + Socket.IO 装配、HTTP 路由
-src/game.js        房间与对局状态机（不依赖 socket，通过回调/事件驱动）
-tools/sim.js       端到端测试：用 socket.io-client 起两个假玩家跑完整流程
-public/index.html  单页四视图（首页 / 房间 / 对局 / 结算）
-public/style.css
-public/app.js
-.verify/ui-e2e.js  真浏览器验收（Lead 维护）
-Dockerfile         生产镜像（node:22-alpine，仅生产依赖，非 root，内置 /health 探活）
+src/server/index.ts    Express + Socket.IO 装配、HTTP 路由、静态资源
+src/server/game.ts     房间与对局状态机（不依赖 socket，通过注入回调驱动）
+src/shared/protocol.ts 前后端共享协议类型
+src/web/index.html     Vite 入口
+src/web/main.ts        createApp 挂载
+src/web/App.vue        视图切换 + 全局层（toast/倒计时/撒花/音效/断线横幅）
+src/web/components/    四视图（Home/Room/Game/Settle）与对局面板、玩家卡、历史等
+src/web/composables/   socket / 会话状态 / 音效 / 倒计时 / 撒花
+src/web/lib/           Canvas 导出海报、下载、存储、剪贴板、格式化
+src/web/styles/        Sass 分片（variables/mixins/base/buttons/views/animations…）
+tools/sim.ts           端到端测试：用 socket.io-client 起两个假玩家跑完整流程
+.verify/ui-e2e.ts      真浏览器验收（Edge headless + CDP，Lead 维护）
+vite.config.ts         前端构建配置（root=src/web → dist/public）
+tsconfig.server.json   后端编译（NodeNext → dist/server）
+tsconfig.app.json      前端类型检查（Bundler + vue-tsc）
+tsconfig.tests.json    测试与验收脚本类型检查
+Dockerfile             生产镜像（多阶段：builder 跑 yarn build，runtime 仅生产依赖、非 root、内置 /health 探活）
 .dockerignore
-docker-compose.yml 单实例编排（房间在内存，禁止扩副本）
+docker-compose.yml     单实例编排（房间在内存，禁止扩副本）
 ```
 
 **写入边界**：
-- 后端只改 `server.js`、`src/game.js`、`tools/sim.js`。
-- 前端只改 `public/**`。
-- `package.json`、`PROTOCOL.md`、`README.md`、`.verify/**`、`Dockerfile`、`.dockerignore`、`docker-compose.yml` 由 Lead 维护，前后端均不得改。
+- 后端只改 `src/server/**`、`tools/**`。
+- 前端只改 `src/web/**`。
+- `src/shared/protocol.ts`、`package.json`、`yarn.lock`、`tsconfig*.json`、`vite.config.ts`、`PROTOCOL.md`、`README.md`、`.verify/**`、`Dockerfile`、`.dockerignore`、`docker-compose.yml` 由 Lead 维护，前后端均不得改。
 
 ## 2. 运行
 
-- `npm start`，端口 `process.env.PORT || 3210`。
+- 安装：`yarn install`（只用 yarn，不要用 npm 生成第二份 lockfile）。
+- 开发：`yarn dev` —— 后端 `tsx watch src/server/index.ts`（3210）+ Vite dev server（5173，`/socket.io` 与 `/health` 代理到 3210）。
+- 生产：`yarn build && yarn start` —— Vite 产出 `dist/public`、tsc 产出 `dist/server`，`node dist/server/index.js` 单进程托管。端口 `process.env.PORT || 3210`。
 - `GET /health` → `{ "ok": true, "rooms": <房间数> }`
-- 静态目录 `public/`，`GET /` 返回 `public/index.html`。
+- 静态目录 `dist/public`，`GET /` 返回 `dist/public/index.html`。
 - 未匹配的路由回落到 `index.html`（保证 `/?room=ABCD` 可用）。
 - 服务端日志前缀统一为 `[同声传意]`。
 
-## 3. 时间参数（集中在 `src/game.js` 顶部常量）
+## 3. 时间参数（集中在 `src/server/game.ts` 顶部常量）
 
 ```js
 const COUNTDOWN_MS = 3000;  // 3-2-1
@@ -293,16 +313,17 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 
 ## 10. 验收标准
 
-1. `npm test` 通过：`tools/sim.js` 自起服务，两个 socket 客户端完成 创建→加入→双方 ready→收到 countdown→open→各自 submit→reveal 判定「不同」→下一轮→第二轮提交相同→won→restart→回 lobby；断言所有关键事件与字段，并断言「在对方提交前拿不到对方词」。
-2. `npm test` 额外覆盖 v2 同意词链路：某轮判定「不同」→ A 投 `round:agree` → 断言 state 出现 `agree.you=true / agree.opponent=false / revealFrozen=true / deadline=null` 且**不再自动推进**（等待 > `REVEAL_MS` 仍停在 reveal）→ B 投 `round:agree` → 断言 `phase='won'`、`result.winBy='agree'`、`result.isWin=true`、`history` 末项 `isWin=true/winBy='agree'`、收到 `room:notice`。
-3. `npm test` 还需断言：撤票可把 `agree.you` 变回 `false` 且 `revealFrozen` 保持 `true`；`won` 阶段投 `round:agree` 返回 `BAD_PHASE`；进入新一轮后上一轮投票清零；`agree` 在非 reveal 阶段的 state 中恒为 `{you:false, opponent:false}`。
-4. `npm start` 后 `GET /health` 返回 200，响应体形状不变。
+1. `yarn test` 通过：`tools/sim.ts` 自起服务，两个 socket 客户端完成 创建→加入→双方 ready→收到 countdown→open→各自 submit→reveal 判定「不同」→下一轮→第二轮提交相同→won→restart→回 lobby；断言所有关键事件与字段，并断言「在对方提交前拿不到对方词」。
+2. `yarn test` 额外覆盖 v2 同意词链路：某轮判定「不同」→ A 投 `round:agree` → 断言 state 出现 `agree.you=true / agree.opponent=false / revealFrozen=true / deadline=null` 且**不再自动推进**（等待 > `REVEAL_MS` 仍停在 reveal）→ B 投 `round:agree` → 断言 `phase='won'`、`result.winBy='agree'`、`result.isWin=true`、`history` 末项 `isWin=true/winBy='agree'`、收到 `room:notice`。
+3. `yarn test` 还需断言：撤票可把 `agree.you` 变回 `false` 且 `revealFrozen` 保持 `true`；`won` 阶段投 `round:agree` 返回 `BAD_PHASE`；进入新一轮后上一轮投票清零；`agree` 在非 reveal 阶段的 state 中恒为 `{you:false, opponent:false}`。
+4. `yarn build && yarn start` 后 `GET /health` 返回 200，响应体形状不变。
 5. 页面无 console 报错，`/?room=ABCD` 能预填房间码。
 6. 手机 375px 宽无横向滚动、按钮可点。
 7. **回归（bug 4）**：完整跑一局至通关 → 点「再来一局」回到房间页 → `#btn-ready` 必须**没有** `is-busy` 类、`aria-busy` 已移除、`textContent` 为「准备」。任意一次 `#btn-ready` 点击之后（无论成功、失败、切页、断线重连）都不得残留 `is-busy`。
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收 63 条全过，且 #reveal-verdict / #agree-hint 两个旧版缺失的 DOM id 现在必须存在。
 
 ## 11. 导出图片契约（纯前端）
 
@@ -316,7 +337,7 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 
 ## 12. 按钮 loading 态清理（bug 4 的硬约束）
 
-- 任何通过 `setBusy(btn, true)` 进入 loading 的按钮，**必须在渲染函数里按当前真实忙态重新赋值**（`classList.toggle('is-busy', busy)`），不能只依赖请求回调去移除。
-- 理由：ack 回调到达时服务端可能已广播了新 phase，渲染函数走了别的分支，`is-busy` 就永久残留；而 CSS 里 `.btn.is-busy { color: transparent }` 会让按钮「没有文字 + 一直转圈」。
-- 因此：`renderRoom` 必须显式清/设 `#btn-ready` 的 `is-busy` 与 `aria-busy`；`renderPlay` 必须对 `#btn-submit` 同理；回到 lobby、离开房间、`aborted`、重开、断线重连这几条路径都要把各自按钮的 loading 态归位。
-- 新加的 `#btn-agree` / `#btn-export` 也必须遵守同一条规则。
+- 任何进入 loading 的按钮，**必须在渲染阶段按当前真实忙态重新赋值**（`classList.toggle('is-busy', busy)`，Vue 里就是在组件渲染期 / computed / watch 里按 ref 重刷），不能只依赖请求回调去移除。
+- 理由：ack 回调到达时服务端可能已广播了新 phase，渲染走了别的分支，`is-busy` 就永久残留；而 CSS 里 `.btn.is-busy { color: transparent }` 会让按钮「没有文字 + 一直转圈」。
+- 因此：房间视图必须显式清/设 `#btn-ready` 的 `is-busy` 与 `aria-busy`；对局面板必须对 `#btn-submit` 同理；回到 lobby、离开房间、`aborted`、重开、断线重连这几条路径都要把各自按钮的 loading 态归位。
+- 新加的 `#btn-agree` / `#btn-export` / `#btn-next` / `#btn-restart` 也必须遵守同一条规则。

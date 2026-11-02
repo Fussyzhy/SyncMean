@@ -1,0 +1,287 @@
+// =============================================================================
+// 结算页：通关卡片、逐轮记录、统计、操作区、导出预览、历史
+// 对应 public/style.css 第 1006–1286 行
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+.settle-hero {
+  text-align: center;
+  padding: 24px 20px 22px;
+}
+
+.settle__kicker {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.24em;
+  color: var(--muted);
+}
+
+.settle__title {
+  margin: 10px 0 0;
+  font-size: clamp(23px, 6.8vw, 31px);
+  font-weight: 900;
+  line-height: 1.32;
+  overflow-wrap: anywhere;
+  @include gradient-text($grad-cta);
+}
+
+.settle__final {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 16px 0 0;
+  min-width: 0;
+}
+
+.settle__word {
+  max-width: 100%;
+  padding: 8px 16px;
+  border-radius: $radius-pill;
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.35;
+  color: $ink;
+  background: $grad-word;
+  overflow-wrap: anywhere;
+
+  // B 位玩家：粉→橙
+  &--b {
+    color: $ink-pink;
+    background: linear-gradient(120deg, var(--pink), var(--warn));
+  }
+}
+
+.settle__x {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.settle__meta {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.settle-block {
+  padding: 2px 4px;
+  min-width: 0;
+}
+
+.settle__h {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--dim);
+}
+
+// ---- 逐轮词语列表 ----
+.settle-rounds {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.settle-round {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  min-width: 0;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line);
+  background: rgba($white, 0.045);
+  font-size: 13px;
+  color: var(--muted);
+  animation: viewIn 0.3s ease both;
+
+  &__n {
+    flex: 0 0 auto;
+    font-size: 12.5px;
+    font-weight: 800;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  &__words {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-weight: 700;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  &__note {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    min-width: 0;
+  }
+
+  &__basis {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--dim);
+    overflow-wrap: anywhere;
+  }
+
+  &__flag {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+
+  &--win {
+    border-color: rgba($lime, 0.34);
+    background: rgba($lime, 0.07);
+
+    .settle-round__flag {
+      color: var(--lime);
+    }
+  }
+
+  &--empty {
+    justify-content: center;
+    font-size: 12px;
+    color: var(--dim);
+  }
+}
+
+.settle__stats {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--line);
+  background: rgba($white, 0.04);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-align: center;
+}
+
+// ---- 操作按钮区 ----
+.settle-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(158px, 100%), 1fr));
+  gap: 10px;
+  min-width: 0;
+
+  .btn {
+    min-width: 0;
+  }
+
+  &--foot {
+    margin-top: 2px;
+  }
+}
+
+// ---- 导出图片预览 ----
+.export-preview {
+  padding: 10px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--line);
+  background: rgba($white, 0.04);
+
+  &:empty {
+    display: none;
+  }
+
+  img {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--radius-s);
+  }
+}
+
+// ---- 历史（旧版结算里的胶囊记录） ----
+.history-wrap {
+  padding: 2px 4px;
+}
+
+.history-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--dim);
+}
+
+.history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  &__empty {
+    font-size: 12px;
+    color: var(--dim);
+    padding: 4px 0;
+  }
+
+  // 注意：__round / __words / __flag 必须在 __item--win 之前输出，
+  // 否则同特异性的 .history__round 会把 is-win 的柠檬黄覆盖回 --text。
+  &__round {
+    color: var(--text);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  &__words {
+    max-width: 160px;
+    @include truncate(1);
+  }
+
+  &__flag {
+    font-size: 10px;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+
+  &__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: 100%;
+    padding: 7px 11px;
+    border-radius: $radius-pill;
+    border: 1px solid var(--line);
+    background: rgba($white, 0.045);
+    font-size: 11.5px;
+    color: var(--muted);
+    animation: viewIn 0.3s ease both;
+
+    &--win {
+      border-color: rgba($lime, 0.36);
+      background: rgba($lime, 0.07);
+      color: var(--lime);
+
+      .history__round,
+      .history__flag {
+        color: var(--lime);
+      }
+    }
+  }
+}

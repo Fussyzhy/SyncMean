@@ -1,0 +1,129 @@
+// =============================================================================
+// 按钮：.btn 基座 + 变体（primary/ghost/plain/block）+ 忙态 spinner + .btn-exit
+// 对应 public/style.css 第 211–310 行、656–680 行
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+.btn {
+  min-height: 52px;
+  padding: 0 20px;
+  border-radius: $radius-btn;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  @include button-base;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  user-select: none;
+  transition: transform 0.14s ease, filter 0.2s ease, background 0.2s ease,
+    border-color 0.2s ease, opacity 0.2s ease;
+
+  &:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  &:focus-visible {
+    @include focus-ring();
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    filter: grayscale(0.25);
+  }
+
+  // ---- 主按钮：青绿→柠檬黄渐变，深色墨字 ----
+  &--primary {
+    color: $ink;
+    background: $grad-primary;
+    box-shadow: 0 14px 32px -16px rgba($cyan, 0.85);
+
+    &:active:not(:disabled) {
+      filter: brightness(1.04);
+    }
+  }
+
+  // ---- 幽灵按钮 ----
+  &--ghost {
+    color: var(--text);
+    background: rgba($white, 0.055);
+    border-color: var(--line);
+
+    &:hover:not(:disabled) {
+      border-color: rgba($cyan, 0.4);
+      background: rgba($cyan, 0.08);
+    }
+  }
+
+  // ---- 纯文字按钮 ----
+  &--plain {
+    color: var(--muted);
+    background: transparent;
+    border-color: transparent;
+    font-weight: 600;
+    font-size: 14px;
+    min-height: 46px;
+
+    &:hover:not(:disabled) {
+      color: var(--text);
+    }
+  }
+
+  &--block {
+    width: 100%;
+  }
+
+  // 忙态：文字透明 + ::after 转圈
+  &.is-busy {
+    position: relative;
+    color: transparent;
+
+    &::after {
+      content: "";
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid rgba($ink, 0.3);
+      border-top-color: rgba($ink, 0.9);
+      animation: spin 0.7s linear infinite;
+    }
+  }
+
+  // 幽灵按钮忙态：转圈改青色。
+  // 必须排在 .btn.is-busy::after 之后 —— 同特异性 (0,2,1) 依源码顺序覆盖。
+  &--ghost.is-busy::after {
+    border-color: rgba($white, 0.2);
+    border-top-color: var(--cyan);
+  }
+}
+
+// 对局页「退出」：独立小按钮（不继承 .btn）
+.btn-exit {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: $radius-s;
+  border: 1px solid var(--line);
+  background: rgba($white, 0.045);
+  color: var(--muted);
+  @include button-base;
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 0.2s ease, border-color 0.2s ease;
+
+  &:hover {
+    color: var(--text);
+    border-color: var(--line-strong);
+  }
+
+  &:focus-visible {
+    @include focus-ring();
+  }
+}

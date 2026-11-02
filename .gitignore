@@ -1,4 +1,18 @@
+# 依赖
 node_modules/
+
+# 构建产物（Vite → dist/public，tsc → dist/server）
+dist/
+.vite/
+
+# 测试与验收产物
 .verify/shots/
+coverage/
+*.tsbuildinfo
+
+# 日志 / 系统 / 编辑器
 *.log
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/

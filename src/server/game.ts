@@ -1,7 +1,5 @@
-'use strict';
-
 /**
- * 同声传意 —— 房间与对局状态机
+ * 同声传意 —— 房间与对局状态机（TypeScript / ESM 版，与旧 src/game.js 逐行等价）
  *
  * 本模块不依赖 socket.io / express：所有对外推送都通过构造时注入的回调完成，
  * 方便单测与替换传输层。
@@ -15,7 +13,29 @@
  * 协议见 PROTOCOL.md（前后端唯一事实来源）。
  */
 
-const crypto = require('crypto');
+import { randomInt, randomUUID } from 'node:crypto';
+
+import type {
+  ActionError,
+  ActionResult,
+  AgreeOk,
+  AgreePair,
+  Basis,
+  CreateOk,
+  CreatePayload,
+  ErrorCode,
+  HistoryItem,
+  JoinOk,
+  JoinPayload,
+  Phase,
+  Result,
+  RestartOk,
+  Seat,
+  ServerToClientEvents,
+  SimpleOk,
+  SubmitOk,
+  WinBy,
+} from '../shared/protocol.js';
 
 // ==================== 时间参数（PROTOCOL.md §3，集中于此） ====================
 const COUNTDOWN_MS = 3000; // 3-2-1
@@ -36,7 +56,7 @@ const NAME_MAX = 12;
 const WORD_MAX = 12;
 const TIMEOUT_WORD = '词穷';
 
-const ERROR_MESSAGES = {
+export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   INVALID_NAME: '昵称需为 1–12 个字符',
   INVALID_CODE: '房间码应为 4 位（字母 A–Z 或数字 2–9）',
   ROOM_NOT_FOUND: '房间不存在，请检查房间码',
@@ -51,40 +71,139 @@ const ERROR_MESSAGES = {
   INTERNAL: '服务器内部错误，请稍后重试',
 };
 
+export const constants = {
+  COUNTDOWN_MS,
+  SUBMIT_MS,
+  REVEAL_MS,
+  START_DELAY,
+  OFFLINE_ROOM_TTL_MS,
+  SWEEP_INTERVAL_MS,
+  CODE_ALPHABET,
+  CODE_RE,
+  NAME_MAX,
+  WORD_MAX,
+  TIMEOUT_WORD,
+} as const;
+
+/* ==================== 内部数据模型（PROTOCOL.md §4，不下发） ==================== */
+
+/** 本轮的提交（词 + 是否超时兜底） */
+export interface Submission {
+  word: string;
+  timedOut: boolean;
+}
+
+export interface Player {
+  token: string;
+  name: string;
+  seat: Seat;
+  socketId: string | null;
+  ready: boolean;
+  connected: boolean;
+  isHost: boolean;
+  /** v2.1：本玩家是否已退出结算页（挂在玩家对象上，断线重连后仍保持） */
+  settleDismissed: boolean;
+}
+
+/** v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角 */
+export interface Snapshot {
+  round: number;
+  basis: Basis | null;
+  history: HistoryItem[];
+  result: Result | null;
+  endedAt: number;
+}
+
+/** 内部同意词票；索引访问按 Seat 收窄 */
+export type SeatMap<T> = { a: T; b: T };
+
+export interface Room {
+  code: string;
+  phase: Phase;
+  round: number;
+  basis: Basis | null;
+  players: Player[];
+  submissions: SeatMap<Submission | null>;
+  agree: AgreePair;
+  revealFrozen: boolean;
+  lastGame: Snapshot | null;
+  result: Result | null;
+  history: HistoryItem[];
+  /** 当前阶段唯一计时器 */
+  timer: ReturnType<typeof setTimeout> | null;
+  deadline: number | null;
+  createdAt: number;
+  lastActivityAt: number;
+  allOfflineAt: number | null;
+}
+
+/* ==================== 注入式传输层 ==================== */
+
+/** 某个「服务端 → 客户端」事件对应的载荷类型 */
+export type ServerPayload<E extends keyof ServerToClientEvents> = Parameters<
+  ServerToClientEvents[E]
+>[0];
+
+export interface GameTransport {
+  emitToRoom<E extends keyof ServerToClientEvents>(
+    code: string,
+    event: E,
+    payload: ServerPayload<E>
+  ): void;
+  emitToPlayer<E extends keyof ServerToClientEvents>(
+    player: Player,
+    event: E,
+    payload: ServerPayload<E>
+  ): void;
+  onSocketReplaced?(oldSocketId: string, room: Room, player: Player): void;
+}
+
+export type GameOptions = {
+  emitToRoom?: GameTransport['emitToRoom'];
+  emitToPlayer?: GameTransport['emitToPlayer'];
+  onSocketReplaced?: NonNullable<GameTransport['onSocketReplaced']>;
+};
+
+/* ==================== 校验工具 ==================== */
+
 /** 统一失败返回 */
-function fail(code) {
+function fail(code: ErrorCode): ActionError {
   return { ok: false, error: code, message: ERROR_MESSAGES[code] || '操作失败' };
 }
 
+/** 校验成功时的返回（value 为归一化后的入参） */
+type Validated = { ok: true; value: string };
+type Validation = Validated | ActionError;
+
 /** 只接受字符串入参，其余一律视为空串（防止 undefined/null 打崩 normalizer） */
-function asString(value) {
+function asString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
 /** 以 Unicode 码点计长度（emoji 不会被算成 2 个字符） */
-function charLength(value) {
+function charLength(value: string): number {
   return Array.from(value).length;
 }
 
-function validateName(raw) {
+function validateName(raw: unknown): Validation {
   const name = asString(raw).trim();
   if (!name || charLength(name) > NAME_MAX) return fail('INVALID_NAME');
   return { ok: true, value: name };
 }
 
-function validateWord(raw) {
+function validateWord(raw: unknown): Validation {
   const word = asString(raw).trim();
   if (!word || charLength(word) > WORD_MAX) return fail('INVALID_WORD');
   return { ok: true, value: word };
 }
 
-function validateCode(raw) {
+function validateCode(raw: unknown): Validation {
   const code = asString(raw).trim().toUpperCase();
   if (!CODE_RE.test(code)) return fail('INVALID_CODE');
   return { ok: true, value: code };
 }
 
-function sanitizeToken(raw) {
+function sanitizeToken(raw: unknown): string {
   const token = asString(raw).trim();
   if (!token || token.length > 128) return '';
   return token;
@@ -94,15 +213,31 @@ function sanitizeToken(raw) {
  * PROTOCOL.md §6 的判定归一化：
  * NFKC、小写、去掉空白 / 标点 / 符号。
  */
-function normalize(word) {
-  return String(word).normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
+export function normalize(word: string): string {
+  return String(word)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]/gu, '');
 }
 
-class Game {
-  constructor(options = {}) {
+/* ==================== 状态机 ==================== */
+
+export class Game {
+  rooms: Map<string, Room>;
+
+  emitToRoom: GameTransport['emitToRoom'];
+
+  emitToPlayer: GameTransport['emitToPlayer'];
+
+  onSocketReplaced: NonNullable<GameTransport['onSocketReplaced']>;
+
+  sweepTimer: ReturnType<typeof setInterval> | null;
+
+  constructor(options: GameOptions = {}) {
     this.rooms = new Map(); // code -> Room
     this.emitToRoom = typeof options.emitToRoom === 'function' ? options.emitToRoom : () => {};
-    this.emitToPlayer = typeof options.emitToPlayer === 'function' ? options.emitToPlayer : () => {};
+    this.emitToPlayer =
+      typeof options.emitToPlayer === 'function' ? options.emitToPlayer : () => {};
     this.onSocketReplaced =
       typeof options.onSocketReplaced === 'function' ? options.onSocketReplaced : () => {};
     this.sweepTimer = null;
@@ -110,22 +245,22 @@ class Game {
 
   // ==================== 查询 / 生命周期 ====================
 
-  roomCount() {
+  roomCount(): number {
     return this.rooms.size;
   }
 
-  roomCodeOf(socketId) {
+  roomCodeOf(socketId: string | null): string | null {
     const found = this._findBySocket(socketId);
     return found ? found.room.code : null;
   }
 
-  startSweeper() {
+  startSweeper(): void {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     if (typeof this.sweepTimer.unref === 'function') this.sweepTimer.unref();
   }
 
-  stopSweeper() {
+  stopSweeper(): void {
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
@@ -133,20 +268,23 @@ class Game {
   }
 
   /** 仅供进程退出 / 测试收尾使用：清空所有计时器与房间 */
-  shutdown() {
+  shutdown(): void {
     this.stopSweeper();
     for (const code of Array.from(this.rooms.keys())) this._deleteRoom(code);
   }
 
   // ==================== 客户端动作 ====================
 
-  createRoom(socketId, payload = {}) {
+  createRoom(
+    socketId: string | null,
+    payload: Partial<CreatePayload> = {}
+  ): ActionResult<CreateOk> {
     const nameRes = validateName(payload.name);
     if (!nameRes.ok) return nameRes;
 
     const code = this._generateCode();
-    const token = sanitizeToken(payload.token) || crypto.randomUUID();
-    const player = {
+    const token = sanitizeToken(payload.token) || randomUUID();
+    const player: Player = {
       token,
       name: nameRes.value,
       seat: 'a',
@@ -157,7 +295,7 @@ class Game {
       settleDismissed: false, // v2.1：是否已退出结算页（PROTOCOL.md §5.3.1）
     };
 
-    const room = {
+    const room: Room = {
       code,
       phase: 'lobby',
       round: 1,
@@ -181,7 +319,7 @@ class Game {
     return { ok: true, code, token, seat: 'a' };
   }
 
-  joinRoom(socketId, payload = {}) {
+  joinRoom(socketId: string | null, payload: Partial<JoinPayload> = {}): ActionResult<JoinOk> {
     const codeRes = validateCode(payload.code);
     if (!codeRes.ok) return codeRes;
     const code = codeRes.value;
@@ -224,9 +362,9 @@ class Game {
     if (room.phase !== 'lobby') return fail('ROOM_IN_PROGRESS');
 
     const occupied = new Set(room.players.map((p) => p.seat));
-    const seat = occupied.has('a') ? 'b' : 'a';
-    const player = {
-      token: crypto.randomUUID(),
+    const seat: Seat = occupied.has('a') ? 'b' : 'a';
+    const player: Player = {
+      token: randomUUID(),
       name: nameRes.value,
       seat,
       socketId: socketId || null,
@@ -253,7 +391,7 @@ class Game {
     };
   }
 
-  leaveRoom(socketId) {
+  leaveRoom(socketId: string | null): ActionResult<SimpleOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
@@ -263,7 +401,8 @@ class Game {
     if (index >= 0) room.players.splice(index, 1);
     // v2.1：留守结算页的人从自己的视角看「这局还没结束」，被丢下等同对局中离开
     const settleWatchers = room.lastGame ? room.players.filter((p) => !p.settleDismissed) : [];
-    const wasPlaying = ['countdown', 'submitting', 'reveal'].includes(room.phase) || settleWatchers.length > 0;
+    const wasPlaying =
+      ['countdown', 'submitting', 'reveal'].includes(room.phase) || settleWatchers.length > 0;
     room.lastActivityAt = Date.now();
     // 快照不再适用于留在房间的人：清掉，避免有人卡在假 won
     this._clearSettle(room);
@@ -294,7 +433,7 @@ class Game {
     return { ok: true };
   }
 
-  setReady(socketId, ready) {
+  setReady(socketId: string | null, ready?: boolean): ActionResult<SimpleOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
@@ -312,7 +451,7 @@ class Game {
     return { ok: true };
   }
 
-  submitWord(socketId, word) {
+  submitWord(socketId: string | null, word?: string): ActionResult<SubmitOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
@@ -346,7 +485,7 @@ class Game {
    * 仅 reveal 阶段有效；首次任一座位投 true 立刻冻结自动推进；两票齐则通关（winBy='agree'）。
    * 返回 { ok, agree:{a,b}, winBy:'agree'|null }。
    */
-  setAgree(socketId, agree) {
+  setAgree(socketId: string | null, agree?: boolean): ActionResult<AgreeOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
@@ -366,7 +505,7 @@ class Game {
       room.deadline = null;
     }
 
-    const ballot = { a: Boolean(votes.a), b: Boolean(votes.b) };
+    const ballot: AgreePair = { a: Boolean(votes.a), b: Boolean(votes.b) };
 
     if (!(votes.a && votes.b)) {
       this.broadcastState(room);
@@ -396,7 +535,7 @@ class Game {
     return { ok: true, agree: { a: true, b: true }, winBy: 'agree' };
   }
 
-  nextRound(socketId) {
+  nextRound(socketId: string | null): ActionResult<SimpleOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     if (found.room.phase !== 'reveal') return fail('BAD_PHASE');
@@ -410,7 +549,7 @@ class Game {
    * 留守结算页的人继续看到 won 视角（含导出所需数据），直到 TA 自己也点「再来一局」。
    * ack：{ ok:true, watching } —— watching 表示是否还有别人留在结算页。
    */
-  restart(socketId) {
+  restart(socketId: string | null): ActionResult<RestartOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
@@ -463,7 +602,7 @@ class Game {
     return { ok: true, watching: staying.length > 0 };
   }
 
-  disconnect(socketId) {
+  disconnect(socketId: string): SimpleOk {
     const found = this._findBySocket(socketId);
     if (!found) return { ok: true };
     const { room, player } = found;
@@ -480,7 +619,7 @@ class Game {
 
   // ==================== 周期清理 ====================
 
-  sweep() {
+  sweep(): void {
     const now = Date.now();
     for (const code of Array.from(this.rooms.keys())) {
       const room = this.rooms.get(code);
@@ -499,7 +638,7 @@ class Game {
   // ==================== 视图 ====================
 
   /** 按接收者视角生成 PublicRoomState（PROTOCOL.md §5.3），永不含词 */
-  getState(room, player) {
+  getState(room: Room, player: Player) {
     const opponent = room.players.find((p) => p.seat !== player.seat) || null;
     const players = room.players
       .slice()
@@ -549,7 +688,7 @@ class Game {
     };
   }
 
-  broadcastState(room) {
+  broadcastState(room: Room | null): void {
     if (!room) return;
     for (const player of room.players) {
       this._emitPlayer(player, 'room:state', this.getState(room, player));
@@ -558,7 +697,7 @@ class Game {
 
   // ==================== 内部：状态机 ====================
 
-  _scheduleStart(room) {
+  _scheduleStart(room: Room): void {
     if (room.phase !== 'lobby') return;
     this._setTimer(
       room,
@@ -572,7 +711,7 @@ class Game {
     );
   }
 
-  _startCountdown(room) {
+  _startCountdown(room: Room): void {
     this._clearTimer(room);
     room.phase = 'countdown';
     room.submissions = { a: null, b: null };
@@ -593,7 +732,7 @@ class Game {
     this._setTimer(room, () => this._openRound(room), COUNTDOWN_MS);
   }
 
-  _openRound(room) {
+  _openRound(room: Room): void {
     if (room.phase !== 'countdown') return;
     room.phase = 'submitting';
     room.deadline = Date.now() + SUBMIT_MS;
@@ -608,7 +747,7 @@ class Game {
     this._setTimer(room, () => this._onSubmitTimeout(room), SUBMIT_MS);
   }
 
-  _onSubmitTimeout(room) {
+  _onSubmitTimeout(room: Room): void {
     if (room.phase !== 'submitting') return;
     for (const player of room.players) {
       if (!room.submissions[player.seat]) {
@@ -618,7 +757,7 @@ class Game {
     this._resolveRound(room);
   }
 
-  _resolveRound(room) {
+  _resolveRound(room: Room): void {
     this._clearTimer(room);
 
     // 正常流程下始终是两名玩家；极端情况（例如对局中被移除）直接中止
@@ -642,9 +781,9 @@ class Game {
     const normB = normalize(words.b);
     const isWin = normA !== '' && normA === normB;
     const timedOut = { a: Boolean(a.timedOut), b: Boolean(b.timedOut) };
-    const winBy = isWin ? 'same' : null;
-    const agree = { a: false, b: false };
-    const result = { round: room.round, words, isWin, timedOut, agree, winBy };
+    const winBy: WinBy | null = isWin ? 'same' : null;
+    const agree: AgreePair = { a: false, b: false };
+    const result: Result = { round: room.round, words, isWin, timedOut, agree, winBy };
     room.result = result;
     room.history.push({
       round: room.round,
@@ -681,7 +820,7 @@ class Game {
   }
 
   /** 进入下一轮：basis = 上一轮的 words，round + 1，回到倒计时 */
-  _advanceRound(room) {
+  _advanceRound(room: Room): void {
     if (room.phase !== 'reveal') return;
     this._clearTimer(room);
 
@@ -708,25 +847,25 @@ class Game {
   // ==================== 内部：工具 ====================
 
   /** 内部同意词票（对历史遗留 / 手工构造的房间做兜底，不新增对外字段） */
-  _agreeOf(room) {
+  _agreeOf(room: Room): AgreePair {
     if (!room.agree || typeof room.agree !== 'object') room.agree = { a: false, b: false };
     room.agree.a = Boolean(room.agree.a);
     room.agree.b = Boolean(room.agree.b);
     return room.agree;
   }
 
-  _generateCode() {
+  _generateCode(): string {
     for (let attempt = 0; attempt < 5000; attempt += 1) {
       let code = '';
       for (let i = 0; i < CODE_LENGTH; i += 1) {
-        code += CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
+        code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
       }
       if (!this.rooms.has(code)) return code;
     }
     throw new Error('无法生成唯一房间码');
   }
 
-  _findBySocket(socketId) {
+  _findBySocket(socketId: string | null): { room: Room; player: Player } | null {
     if (!socketId) return null;
     for (const room of this.rooms.values()) {
       for (const player of room.players) {
@@ -736,20 +875,22 @@ class Game {
     return null;
   }
 
-  _publicHistory(items) {
+  _publicHistory(items: HistoryItem[]): HistoryItem[] {
     const list = Array.isArray(items) ? items : [];
     return list.map((item) => ({
       round: item.round,
       basis: item.basis ? { a: item.basis.a, b: item.basis.b } : null,
       words: { a: item.words.a, b: item.words.b },
       isWin: Boolean(item.isWin),
-      agree: item.agree ? { a: Boolean(item.agree.a), b: Boolean(item.agree.b) } : { a: false, b: false },
+      agree: item.agree
+        ? { a: Boolean(item.agree.a), b: Boolean(item.agree.b) }
+        : { a: false, b: false },
       winBy: item.winBy === 'same' || item.winBy === 'agree' ? item.winBy : null,
     }));
   }
 
   /** §5.3 的 result 形状；对已是公开形状的对象幂等，故 lastGame 快照可直接复用 */
-  _publicResult(result) {
+  _publicResult(result: Result | null): Result | null {
     if (!result) return null;
     return {
       round: result.round,
@@ -759,33 +900,43 @@ class Game {
         a: Boolean(result.timedOut.a),
         b: Boolean(result.timedOut.b),
       },
-      agree: result.agree ? { a: Boolean(result.agree.a), b: Boolean(result.agree.b) } : { a: false, b: false },
+      agree: result.agree
+        ? { a: Boolean(result.agree.a), b: Boolean(result.agree.b) }
+        : { a: false, b: false },
       winBy: result.winBy === 'same' || result.winBy === 'agree' ? result.winBy : null,
     };
   }
 
-  _publicBasis(basis) {
+  _publicBasis(basis: Basis | null): Basis | null {
     return basis ? { a: basis.a, b: basis.b } : null;
   }
 
   /** v2.1：结算快照作废——留在房间的在场玩家都不该卡在假 won */
-  _clearSettle(room) {
+  _clearSettle(room: Room | null): void {
     if (!room) return;
     room.lastGame = null;
     for (const p of room.players) p.settleDismissed = false;
   }
 
-  _emitRoom(room, event, payload) {
+  _emitRoom<E extends keyof ServerToClientEvents>(
+    room: Room | null,
+    event: E,
+    payload: ServerPayload<E>
+  ): void {
     if (!room) return;
     this.emitToRoom(room.code, event, payload);
   }
 
-  _emitPlayer(player, event, payload) {
+  _emitPlayer<E extends keyof ServerToClientEvents>(
+    player: Player | null,
+    event: E,
+    payload: ServerPayload<E>
+  ): void {
     if (!player || !player.socketId) return;
     this.emitToPlayer(player, event, payload);
   }
 
-  _clearTimer(room) {
+  _clearTimer(room: Room | null): void {
     if (room && room.timer) {
       clearTimeout(room.timer);
       room.timer = null;
@@ -793,7 +944,7 @@ class Game {
   }
 
   /** 同一房间同一时刻只允许一个计时器 */
-  _setTimer(room, fn, ms) {
+  _setTimer(room: Room, fn: () => void, ms: number): void {
     this._clearTimer(room);
     room.timer = setTimeout(() => {
       room.timer = null;
@@ -805,7 +956,7 @@ class Game {
     }, ms);
   }
 
-  _deleteRoom(code) {
+  _deleteRoom(code: string): boolean {
     const room = this.rooms.get(code);
     if (!room) return false;
     this._clearTimer(room);
@@ -815,20 +966,4 @@ class Game {
   }
 }
 
-module.exports = Game;
-module.exports.Game = Game;
-module.exports.normalize = normalize;
-module.exports.ERROR_MESSAGES = ERROR_MESSAGES;
-module.exports.constants = {
-  COUNTDOWN_MS,
-  SUBMIT_MS,
-  REVEAL_MS,
-  START_DELAY,
-  OFFLINE_ROOM_TTL_MS,
-  SWEEP_INTERVAL_MS,
-  CODE_ALPHABET,
-  CODE_RE,
-  NAME_MAX,
-  WORD_MAX,
-  TIMEOUT_WORD,
-};
+export default Game;

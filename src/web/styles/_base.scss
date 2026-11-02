@@ -1,0 +1,104 @@
+// =============================================================================
+// 通用组件：显隐工具、玻璃卡片、字段、输入框、行布局
+// 对应 public/style.css 第 74–209 行
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+// ---- 显隐工具类（app.js / Vue 通过它切换视图与局部显隐） ----
+.is-hidden {
+  display: none !important;
+}
+
+// ---- 玻璃卡片 ----
+.card {
+  position: relative;
+  padding: 20px;
+  @include panel(var(--radius-l));
+  background: linear-gradient(180deg, rgba($white, 0.075), rgba($white, 0.025));
+  @include frosted(14px);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field__label {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+
+// ---- 输入框 ----
+.input {
+  width: 100%;
+  min-height: 52px;
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: 17px;
+  color: var(--text);
+  background: rgba(5, 10, 20, 0.62);
+  border: 1px solid var(--line);
+  border-radius: $radius-input;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  appearance: none;
+
+  &::placeholder {
+    color: var(--dim);
+    font-size: 15px;
+  }
+
+  &:focus {
+    outline: none;
+    border-color: rgba($cyan, 0.65);
+    box-shadow: 0 0 0 3px rgba($cyan, 0.14);
+    background: rgba(5, 12, 24, 0.85);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &--code {
+    font-weight: 800;
+    font-size: 20px;
+    letter-spacing: 0.32em;
+    text-align: center;
+    text-transform: uppercase;
+    padding-left: calc(16px + 0.32em);
+  }
+
+  &--word {
+    font-size: 18px;
+    font-weight: 600;
+  }
+}
+
+// ---- 行布局：输入框 + 按钮 ----
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+
+  .input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .btn {
+    flex: 0 0 auto;
+    min-width: 92px;
+  }
+}

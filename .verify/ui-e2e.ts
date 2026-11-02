@@ -1,35 +1,234 @@
-'use strict';
 /**
  * 真实浏览器端到端验收（Edge headless + CDP，无需额外依赖）
- *   node .verify/ui-e2e.js          # 跑完整双人对局流程（含同意词投票、结算导出、准备按钮 loading 回归）
- *   node .verify/ui-e2e.js --smoke  # 仅验证 CDP 工具链可用
+ *   npx tsx .verify/ui-e2e.ts          # 跑完整双人对局流程（含同意词投票、结算导出、准备按钮 loading 回归）
+ *   npx tsx .verify/ui-e2e.ts --smoke  # 仅验证 CDP 工具链可用
  * 前置：服务已在 http://127.0.0.1:3210 运行。
+ *
+ * 迁移说明：本文件由 .verify/ui-e2e.js（只读蓝本）1:1 迁移为 TypeScript，
+ * 保留全部 63 条对局 check（+ --smoke 1 条），未放宽任何断言；DOM id 与 PROTOCOL.md §9 一致。
  */
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
+import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// ESM 下没有 __dirname，用 import.meta.url 还原脚本目录
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 const EDGE = process.env.EDGE_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const APP_URL = process.env.APP_URL || 'http://127.0.0.1:3210';
 const CDP_PORT = Number(process.env.CDP_PORT || 9333);
-const OUT = path.join(__dirname, 'shots');
+const OUT = path.join(HERE, 'shots');
 const SMOKE = process.argv.includes('--smoke');
 // PROTOCOL.md §3：揭晓停留 4.5s 后自动进下一轮，用于验证「投票后冻结」
 const REVEAL_MS = 4500;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const log = (...a) => console.log(...a);
-const shots = [];
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const log = (...a: unknown[]): void => console.log(...a);
+const shots: string[] = [];
+
+/* ------------------------------------------------------------------ */
+/* 自有最小类型：CDP 协议消息（不引入 puppeteer / playwright 等依赖）      */
+/* ------------------------------------------------------------------ */
+
+interface CdpError {
+  code: number;
+  message: string;
+}
+
+/** CDP 线上消息：请求 / 响应共用同一信封（id 对应请求，method+params 为事件） */
+interface CdpMessage {
+  id?: number;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: CdpError;
+  sessionId?: string;
+}
+
+interface CdpRequest {
+  id: number;
+  method: string;
+  params: Record<string, unknown>;
+  sessionId?: string;
+}
+
+interface PendingRequest {
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+}
+
+type AnyEventListener = (params: unknown, sessionId: string | undefined) => void;
+
+/** 页面 console 参数（Runtime.consoleAPICalled） */
+interface ConsoleApiArg {
+  value?: unknown;
+  description?: string;
+}
+
+interface RuntimeConsoleAPICalledParams {
+  type?: string;
+  args?: ConsoleApiArg[];
+}
+
+interface ExceptionThrownParams {
+  exceptionDetails?: {
+    text?: string;
+    exception?: { description?: string };
+  };
+}
+
+interface LogEntryAddedParams {
+  entry?: { level?: string; text?: string };
+}
+
+/** 本脚本用到的事件集合，保证 on() / handler 参数按事件收窄 */
+interface CdpEventMap {
+  'Runtime.consoleAPICalled': RuntimeConsoleAPICalledParams;
+  'Runtime.exceptionThrown': ExceptionThrownParams;
+  'Log.entryAdded': LogEntryAddedParams;
+}
+
+/** /json/version 的响应（只取本脚本需要的字段） */
+interface DevToolsVersionInfo {
+  webSocketDebuggerUrl: string;
+  browser?: string;
+  protocolVersion?: string;
+}
+
+interface RemoteObject {
+  value?: unknown;
+}
+
+interface ExceptionDetails {
+  text?: string;
+  exception?: { description?: string };
+}
+
+interface EvaluateResult {
+  result?: RemoteObject;
+  exceptionDetails?: ExceptionDetails;
+}
+
+interface CaptureScreenshotResult {
+  data?: string;
+}
+
+/* ------------------------------------------------------------------ */
+/* 页面求值结果的最小类型守卫（页面脚本返回值是 unknown，逐处收窄）        */
+/* ------------------------------------------------------------------ */
+
+interface BusyState {
+  exists: true;
+  text: string;
+  isBusy: boolean;
+  ariaBusy: string | null;
+  colorTransparent: boolean;
+  disabled: boolean;
+}
+
+interface DownloadInfo {
+  clicked: number;
+  name: string;
+  bytes: number;
+  isPng: boolean;
+  w: number;
+  h: number;
+  b64?: string;
+  error?: string;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/** /json/version 的键名是 CDP 风格的 `Browser` / `Protocol-Version`（也兼容 snake/camel 写法） */
+function readStringField(r: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = r[key];
+    if (typeof value === 'string') return value;
+  }
+  return undefined;
+}
+
+function parseVersionInfo(value: unknown): DevToolsVersionInfo | null {
+  const r = asRecord(value);
+  if (typeof r.webSocketDebuggerUrl !== 'string') return null;
+  return {
+    webSocketDebuggerUrl: r.webSocketDebuggerUrl,
+    browser: readStringField(r, 'Browser', 'browser'),
+    protocolVersion: readStringField(r, 'Protocol-Version', 'protocolVersion'),
+  };
+}
+
+function toBusyState(value: unknown): BusyState | null {
+  const r = asRecord(value);
+  if (
+    r.exists !== true ||
+    typeof r.text !== 'string' ||
+    typeof r.isBusy !== 'boolean' ||
+    typeof r.colorTransparent !== 'boolean' ||
+    typeof r.disabled !== 'boolean'
+  ) {
+    return null;
+  }
+  const ariaBusy =
+    typeof r.ariaBusy === 'string'
+      ? r.ariaBusy
+      : r.ariaBusy === null || r.ariaBusy === undefined
+        ? null
+        : String(r.ariaBusy);
+  return {
+    exists: true,
+    text: r.text,
+    isBusy: r.isBusy,
+    ariaBusy,
+    colorTransparent: r.colorTransparent,
+    disabled: r.disabled,
+  };
+}
+
+function toDownloadInfo(value: unknown): DownloadInfo {
+  const r = asRecord(value);
+  return {
+    clicked: typeof r.clicked === 'number' ? r.clicked : 0,
+    name: typeof r.name === 'string' ? r.name : '',
+    bytes: typeof r.bytes === 'number' ? r.bytes : 0,
+    isPng: r.isPng === true,
+    w: typeof r.w === 'number' ? r.w : 0,
+    h: typeof r.h === 'number' ? r.h : 0,
+    b64: typeof r.b64 === 'string' ? r.b64 : undefined,
+    error: typeof r.error === 'string' ? r.error : undefined,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Browser：启动 Edge、轮询 CDP、WebSocket 消息分发与请求超时             */
+/* ------------------------------------------------------------------ */
 
 class Browser {
-  constructor() {
-    this.id = 0;
-    this.pending = new Map();
-    this.handlers = new Map();
+  private nextId = 0;
+  private readonly pending = new Map<number, PendingRequest>();
+  private readonly listeners = new Map<string, AnyEventListener[]>();
+  readonly browserVersion: string;
+  readonly protocolVersion: string;
+
+  private constructor(
+    private readonly proc: ChildProcess,
+    private readonly profile: string,
+    private readonly ws: WebSocket,
+    info: DevToolsVersionInfo,
+  ) {
+    this.browserVersion = info.browser ?? 'unknown';
+    this.protocolVersion = info.protocolVersion ?? 'unknown';
   }
 
-  static async launch() {
+  static async launch(): Promise<Browser> {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'w321-edge-'));
     const proc = spawn(EDGE, [
       '--headless=new',
@@ -45,79 +244,89 @@ class Browser {
       'about:blank',
     ], { stdio: 'ignore' });
 
-    let info = null;
+    let info: DevToolsVersionInfo | null = null;
     for (let i = 0; i < 120; i++) {
       try {
         const r = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`);
-        info = await r.json();
-        break;
+        info = parseVersionInfo(await r.json());
+        if (info) break;
       } catch {
-        await sleep(150);
+        // CDP 端口尚未就绪，继续轮询
       }
+      await sleep(150);
     }
     if (!info) {
       proc.kill();
       throw new Error('浏览器未能启动（CDP 端口无响应）');
     }
 
-    const b = new Browser();
-    b.proc = proc;
-    b.profile = profile;
-    b.ws = new WebSocket(info.webSocketDebuggerUrl);
-    await new Promise((res, rej) => {
-      b.ws.addEventListener('open', res, { once: true });
-      b.ws.addEventListener('error', rej, { once: true });
+    const ws = new WebSocket(info.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener('open', () => resolve(), { once: true });
+      ws.addEventListener('error', () => reject(new Error('CDP WebSocket 连接失败')), { once: true });
     });
-    b.ws.addEventListener('message', (ev) => {
-      try { b._onMessage(JSON.parse(String(ev.data))); } catch { /* ignore */ }
+
+    const browser = new Browser(proc, profile, ws, info);
+    ws.addEventListener('message', (ev) => {
+      try {
+        browser.handleMessage(JSON.parse(String(ev.data)) as CdpMessage);
+      } catch {
+        // 忽略无法解析的消息
+      }
     });
-    return b;
+    log(`  🧭 Edge ${browser.browserVersion} / CDP ${browser.protocolVersion}`);
+    return browser;
   }
 
-  _onMessage(msg) {
-    if (msg.id && this.pending.has(msg.id)) {
-      const { resolve, reject } = this.pending.get(msg.id);
-      this.pending.delete(msg.id);
-      if (msg.error) reject(new Error(`${msg.error.message} (${msg.error.code})`));
-      else resolve(msg.result);
-      return;
+  private handleMessage(msg: CdpMessage): void {
+    if (typeof msg.id === 'number') {
+      const pending = this.pending.get(msg.id);
+      if (pending) {
+        this.pending.delete(msg.id);
+        if (msg.error) pending.reject(new Error(`${msg.error.message} (${msg.error.code})`));
+        else pending.resolve(msg.result);
+        return;
+      }
     }
-    if (msg.method) {
-      const fns = this.handlers.get(msg.method) || [];
+    if (typeof msg.method === 'string') {
+      const fns = this.listeners.get(msg.method) ?? [];
       for (const fn of fns) fn(msg.params, msg.sessionId);
     }
   }
 
-  on(method, fn) {
-    if (!this.handlers.has(method)) this.handlers.set(method, []);
-    this.handlers.get(method).push(fn);
+  on<K extends keyof CdpEventMap>(method: K, fn: (params: CdpEventMap[K], sessionId: string | undefined) => void): void {
+    const fns = this.listeners.get(method) ?? [];
+    fns.push((params, sessionId) => fn(params as CdpEventMap[K], sessionId));
+    this.listeners.set(method, fns);
   }
 
-  send(method, params = {}, sessionId) {
-    const id = ++this.id;
-    const payload = { id, method, params };
+  send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<T> {
+    const id = ++this.nextId;
+    const payload: CdpRequest = { id, method, params };
     if (sessionId) payload.sessionId = sessionId;
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
       this.ws.send(JSON.stringify(payload));
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.pending.has(id)) {
           this.pending.delete(id);
           reject(new Error(`CDP 超时: ${method}`));
         }
       }, 30000);
+      // 仅超时兜底用，不应让进程为了等它而多活 30s
+      timer.unref();
     });
   }
 
-  async newPage() {
-    const { targetId } = await this.send('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await this.send('Target.attachToTarget', { targetId, flatten: true });
+  async newPage(): Promise<Page> {
+    const { targetId } = await this.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await this.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
     const page = new Page(this, sessionId, targetId);
     await page.init();
     return page;
   }
 
-  async close() {
+  async close(): Promise<void> {
     try { this.ws.close(); } catch { /* ignore */ }
     try { this.proc.kill(); } catch { /* ignore */ }
     await sleep(300);
@@ -125,27 +334,32 @@ class Browser {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Page：单标签页（CDP session）上的导航、求值、等待与交互辅助           */
+/* ------------------------------------------------------------------ */
+
 class Page {
-  constructor(browser, sessionId, targetId) {
-    this.b = browser;
-    this.sessionId = sessionId;
-    this.targetId = targetId;
-    this.consoleErrors = [];
-    this.pageErrors = [];
+  readonly consoleErrors: string[] = [];
+  readonly pageErrors: string[] = [];
+
+  constructor(
+    private readonly b: Browser,
+    readonly sessionId: string,
+    readonly targetId: string,
+  ) {}
+
+  send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+    return this.b.send<T>(method, params, this.sessionId);
   }
 
-  send(method, params = {}) {
-    return this.b.send(method, params, this.sessionId);
-  }
-
-  async init() {
+  async init(): Promise<void> {
     await this.send('Page.enable');
     await this.send('Runtime.enable');
     await this.send('Log.enable');
     this.b.on('Runtime.consoleAPICalled', (p, sid) => {
       if (sid !== this.sessionId) return;
       if (p.type === 'error') {
-        this.consoleErrors.push((p.args || []).map((a) => a.value ?? a.description ?? '').join(' '));
+        this.consoleErrors.push((p.args ?? []).map((a) => String(a.value ?? a.description ?? '')).join(' '));
       }
     });
     this.b.on('Runtime.exceptionThrown', (p, sid) => {
@@ -159,33 +373,34 @@ class Page {
     await this.setViewport(430, 932);
   }
 
-  async setViewport(width, height, mobile = true) {
+  async setViewport(width: number, height: number, mobile = true): Promise<void> {
     await this.send('Emulation.setDeviceMetricsOverride', {
       width, height, deviceScaleFactor: 2, mobile,
       screenWidth: width, screenHeight: height,
     });
   }
 
-  async goto(url) {
+  async goto(url: string): Promise<void> {
     await this.send('Page.navigate', { url });
     await this.waitFor('document.readyState === "complete"', 20000, '页面加载');
     await sleep(400);
   }
 
-  async eval(expression) {
-    const r = await this.send('Runtime.evaluate', {
+  /** 在页面里求值；页面脚本异常直接抛出（与旧脚本一致） */
+  async eval(expression: string): Promise<unknown> {
+    const r = await this.send<EvaluateResult>('Runtime.evaluate', {
       expression,
       returnByValue: true,
       awaitPromise: true,
       userGesture: true,
     });
     if (r.exceptionDetails) {
-      throw new Error('页面脚本异常: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
+      throw new Error('页面脚本异常: ' + String(r.exceptionDetails.exception?.description || r.exceptionDetails.text));
     }
     return r.result?.value;
   }
 
-  async waitFor(expression, timeout = 15000, label = expression) {
+  async waitFor(expression: string, timeout = 15000, label = expression): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeout) {
       try {
@@ -196,18 +411,18 @@ class Page {
     throw new Error(`等待超时: ${label}`);
   }
 
-  async click(selector) {
-    const ok = await this.eval(`(() => {
+  async click(selector: string): Promise<void> {
+    const ok = Boolean(await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
       el.click();
       return true;
-    })()`);
+    })()`));
     if (!ok) throw new Error(`找不到可点击元素: ${selector}`);
   }
 
-  async type(selector, text) {
-    const ok = await this.eval(`(() => {
+  async type(selector: string, text: string): Promise<void> {
+    const ok = Boolean(await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
       el.focus();
@@ -215,34 +430,36 @@ class Page {
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
-    })()`);
+    })()`));
     if (!ok) throw new Error(`找不到输入框: ${selector}`);
   }
 
-  async text(selector) {
-    return this.eval(`(() => {
+  async text(selector: string): Promise<string | null> {
+    const value = await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       return el ? el.innerText.trim() : null;
     })()`);
+    return typeof value === 'string' ? value : null;
   }
 
-  async bodyText() {
-    return this.eval('document.body ? document.body.innerText : ""');
+  async bodyText(): Promise<string> {
+    const value = await this.eval('document.body ? document.body.innerText : ""');
+    return typeof value === 'string' ? value : '';
   }
 
   /** 元素在视口内可见且未被禁用 */
-  async readyToType(selector) {
-    return this.eval(`(() => {
+  async readyToType(selector: string): Promise<boolean> {
+    return Boolean(await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0 && !el.disabled;
-    })()`);
+    })()`));
   }
 
   /** 元素视觉可见（有尺寸、未被 display:none / visibility:hidden 隐藏）。只看渲染事实，不看 aria-hidden。 */
-  async isVisible(selector) {
-    return this.eval(`(() => {
+  async isVisible(selector: string): Promise<boolean> {
+    return Boolean(await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return false;
       const r = el.getBoundingClientRect();
@@ -256,12 +473,12 @@ class Page {
         node = node.parentElement;
       }
       return true;
-    })()`);
+    })()`));
   }
 
   /** 按钮是否残留 loading 态（bug 回归用） */
-  async busyState(selector) {
-    return this.eval(`(() => {
+  async busyState(selector: string): Promise<BusyState | null> {
+    return toBusyState(await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       if (!el) return null;
       const cs = getComputedStyle(el);
@@ -273,15 +490,15 @@ class Page {
         colorTransparent: /rgba?\\(\\s*0,\\s*0,\\s*0,\\s*0\\s*\\)|transparent/i.test(cs.color),
         disabled: !!el.disabled
       };
-    })()`);
+    })()`));
   }
 
   /**
    * 拦截导出下载：包裹 HTMLAnchorElement.prototype.click 与 a.download 路径，
    * 再把拿到的 href（blob: 或 data:）解析成真实字节，返回 PNG 头与尺寸。
    */
-  async armDownloadHook() {
-    return this.eval(`(() => {
+  async armDownloadHook(): Promise<boolean> {
+    return Boolean(await this.eval(`(() => {
       window.__dl = { clicked: 0, href: '', name: '', error: '' };
       const orig = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function () {
@@ -296,11 +513,11 @@ class Page {
         return orig.apply(this, arguments);
       };
       return true;
-    })()`);
+    })()`));
   }
 
-  async readDownload() {
-    return this.eval(`(async () => {
+  async readDownload(): Promise<DownloadInfo> {
+    return toDownloadInfo(await this.eval(`(async () => {
       const d = window.__dl || { clicked: 0, href: '', name: '' };
       if (!d.clicked || !d.href) return { clicked: d.clicked || 0, name: d.name || '', bytes: 0, isPng: false, w: 0, h: 0 };
       let buf;
@@ -327,14 +544,14 @@ class Page {
         b64 = btoa(s);
       } catch (e) { b64 = ''; }
       return { clicked: d.clicked, name: d.name, bytes: buf.length, isPng, w, h, b64 };
-    })()`);
+    })()`));
   }
 
-  async screenshot(name) {
+  async screenshot(name: string): Promise<string | null> {
     // 截图只是证据、不是断言：CDP 偶尔会卡（大图预览 + headless），绝不能因此中断整条链路。
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const r = await this.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+        const r = await this.send<CaptureScreenshotResult>('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
         if (!r || !r.data) throw new Error('无 data');
         const file = path.join(OUT, name);
         fs.writeFileSync(file, Buffer.from(r.data, 'base64'));
@@ -343,10 +560,10 @@ class Page {
         return file;
       } catch (err) {
         if (attempt === 1) {
-          log(`  ⚠️ 截图 ${name} 失败（${err.message}），重试一次…`);
+          log(`  ⚠️ 截图 ${name} 失败（${errorMessage(err)}），重试一次…`);
           await sleep(1200);
         } else {
-          log(`  ⚠️ 截图 ${name} 跳过（${err.message}）——不影响功能断言`);
+          log(`  ⚠️ 截图 ${name} 跳过（${errorMessage(err)}）——不影响功能断言`);
         }
       }
     }
@@ -354,13 +571,17 @@ class Page {
   }
 }
 
-const problems = [];
-function check(cond, msg) {
+/* ------------------------------------------------------------------ */
+/* 断言与流程                                                          */
+/* ------------------------------------------------------------------ */
+
+const problems: string[] = [];
+function check(cond: unknown, msg: string): void {
   if (cond) log(`  ✅ ${msg}`);
   else { problems.push(msg); log(`  ❌ ${msg}`); }
 }
 
-async function smoke(browser) {
+async function smoke(browser: Browser): Promise<void> {
   const page = await browser.newPage();
   await page.goto('data:text/html,<h1 style="font-family:sans-serif">CDP OK</h1>');
   const t = await page.text('h1');
@@ -368,7 +589,13 @@ async function smoke(browser) {
   await page.screenshot('00-smoke.png');
 }
 
-async function run(browser) {
+interface RoundOptions {
+  shotBefore?: string;
+  shotReveal?: string;
+  advance?: boolean;
+}
+
+async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   log('\n[1] 玩家 A 打开首页');
   const a = await browser.newPage();
   await a.goto(APP_URL + '/');
@@ -382,7 +609,7 @@ async function run(browser) {
   await a.type('#nickname-input', '小明');
   await a.click('#btn-create');
   await a.waitFor('!!document.querySelector("#view-room") && getComputedStyle(document.querySelector("#view-room")).display !== "none"', 15000, '进入房间页');
-  const code = (await a.text('#room-code') || '').trim();
+  const code = ((await a.text('#room-code')) || '').trim();
   check(/^[A-Z0-9]{4}$/.test(code), `房间码格式正确（${code}）`);
   await a.screenshot('02-room-waiting.png');
 
@@ -391,7 +618,7 @@ async function run(browser) {
   await b.goto(`${APP_URL}/?room=${encodeURIComponent(code)}`);
   await b.waitFor('!!document.querySelector("#code-input")', 15000, 'B 首页渲染');
   const prefilled = await b.eval('document.querySelector("#code-input").value');
-  check(prefilled === code, `邀请链接自动预填房间码（${prefilled}）`);
+  check(prefilled === code, `邀请链接自动预填房间码（${String(prefilled)}）`);
   await b.type('#nickname-input', '小红');
   await b.click('#btn-join');
   await b.waitFor('!!document.querySelector("#view-room") && getComputedStyle(document.querySelector("#view-room")).display !== "none"', 15000, 'B 进入房间页');
@@ -421,7 +648,7 @@ async function run(browser) {
   await a.screenshot('04-countdown.png');
 
   // 完整跑一轮「提交→双盲→揭晓」；advance=true 则揭晓后手动进下一轮。
-  async function playRound(wa, wb, o) {
+  async function playRound(wa: string, wb: string, o?: RoundOptions): Promise<void> {
     const opt = o || {};
     await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'A 输入开放（' + wa + '）');
     await a.type('#word-input', wa);
@@ -447,10 +674,10 @@ async function run(browser) {
   await playRound('苹果', '云朵', { shotReveal: '06-reveal.png' });
 
   log('\n[6] 第 3 轮揭晓「苹果 / 云朵」不一样（停留 reveal，准备走同意词流程）');
-  const ra = await a.text('#reveal-a');
-  const rb = await a.text('#reveal-b');
+  const ra = (await a.text('#reveal-a')) ?? '';
+  const rb = (await b.text('#reveal-b')) ?? '';
   check(ra.includes('苹果') && rb.includes('云朵'), `双方同时揭晓（${ra} vs ${rb}）`);
-  check(/不一样|继续/.test(await a.text('#reveal-verdict') || ''), '判定文案为「不一样，继续联想」');
+  check(/不一样|继续/.test((await a.text('#reveal-verdict')) || ''), '判定文案为「不一样，继续联想」');
 
   log('\n[6.5] 同意词投票：A 先投 → 必须冻结自动推进');
   check(await a.isVisible('#agree-row'), '揭晓面板出现同意词投票区 #agree-row');
@@ -466,9 +693,9 @@ async function run(browser) {
   // PROTOCOL §3/§7：一旦有人投票，本轮 4.5s 自动推进必须取消，只能手动继续
   await sleep(REVEAL_MS + 1500);
   check(await a.isVisible('#agree-row'), `投票后 ${((REVEAL_MS + 1500) / 1000).toFixed(1)}s 仍停在 reveal（自动推进已冻结）`);
-  check((await a.text('#reveal-a') || '').includes('苹果'), '冻结期间揭晓内容未被下一轮');
+  check(((await a.text('#reveal-a')) || '').includes('苹果'), '冻结期间揭晓内容未被下一轮');
   check(await a.isVisible('#btn-next'), '冻结期间仍可手动点「下一轮」');
-  const overlayOn = await a.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; const cs = getComputedStyle(el); return cs.display !== "none" && el.classList.contains("is-on"); })()');
+  const overlayOn = Boolean(await a.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; const cs = getComputedStyle(el); return cs.display !== "none" && el.classList.contains("is-on"); })()'));
   check(!overlayOn, '冻结期间没有出现倒计时遮罩（确实没进下一轮）');
 
   log('\n[6.5b] A 撤票 → 再投：撤票不恢复计时器');
@@ -488,22 +715,22 @@ async function run(browser) {
   check(true, '双方都确认后 phase=won，两端都进入结算视图 #view-settle');
   const settleTitle = await a.text('#settle-title');
   check(/同意|确认|同义/.test(settleTitle || ''), `结算标题体现同意词通关（${(settleTitle || '').trim()}）`);
-  const settleFinal = await a.text('#settle-final');
+  const settleFinal = (await a.text('#settle-final')) ?? '';
   check(settleFinal.includes('苹果') && settleFinal.includes('云朵'), `结算展示最终成功的两个词（${settleFinal.trim()}）`);
-  const settleRounds = await a.text('#settle-rounds');
+  const settleRounds = (await a.text('#settle-rounds')) ?? '';
   check(
     ['山', '水', '猫', '狗', '苹果', '云朵'].every((w) => settleRounds.includes(w)),
     '结算逐轮列表包含全部 3 轮的词（竖向时间线数据完整）'
   );
-  check(/3/.test(await a.text('#settle-stats') || ''), '结算统计体现共 3 轮');
-  check(/同声传意/.test(await a.bodyText() || ''), '结算页品牌为「同声传意」');
+  check(/3/.test((await a.text('#settle-stats')) || ''), '结算统计体现共 3 轮');
+  check(/同声传意/.test((await a.bodyText()) || ''), '结算页品牌为「同声传意」');
   await a.screenshot('11-settle-agree.png');
   await b.screenshot('11b-settle-agree-b.png');
 
   log('\n[6.7] 导出整局词语列表图片（#btn-export）');
   await a.armDownloadHook();
   await a.click('#btn-export');
-  let dl = { clicked: 0, bytes: 0, isPng: false, w: 0, h: 0 };
+  let dl: DownloadInfo = { clicked: 0, bytes: 0, isPng: false, w: 0, h: 0, name: '' };
   for (let i = 0; i < 40 && !(dl.clicked && dl.bytes > 0); i++) {
     await sleep(250);
     dl = await a.readDownload();
@@ -531,15 +758,15 @@ async function run(browser) {
   await sleep(1200);
   check(await b.isVisible('#view-settle'), 'B 仍停留在结算页 #view-settle（没有被强制退出）');
   check(!(await b.isVisible('#view-room')), 'B 没有被切到准备页');
-  const bSettleFinal = await b.text('#settle-final');
+  const bSettleFinal = (await b.text('#settle-final')) ?? '';
   check(bSettleFinal.includes('苹果') && bSettleFinal.includes('云朵'), `B 的结算内容仍是通关那局（${bSettleFinal.trim().replace(/\s+/g, ' ')}）`);
-  check((await b.text('#settle-rounds') || '').includes('苹果'), 'B 的逐轮列表仍在');
+  check(((await b.text('#settle-rounds')) || '').includes('苹果'), 'B 的逐轮列表仍在');
   await b.screenshot('17-settle-b-still-viewing.png');
 
   // 留守方仍可导出
   await b.armDownloadHook();
   await b.click('#btn-export');
-  let dlB = { clicked: 0, bytes: 0, isPng: false, w: 0, h: 0 };
+  let dlB: DownloadInfo = { clicked: 0, bytes: 0, isPng: false, w: 0, h: 0, name: '' };
   for (let i = 0; i < 40 && !(dlB.clicked && dlB.bytes > 0); i++) {
     await sleep(250);
     dlB = await b.readDownload();
@@ -549,7 +776,7 @@ async function run(browser) {
   // A 在对方留守期间不能把对局开起来
   await a.click('#btn-ready').catch(() => {});
   await sleep(1800);
-  const aOverlay = await a.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; return el.classList.contains("is-on") && getComputedStyle(el).display !== "none"; })()');
+  const aOverlay = Boolean(await a.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; return el.classList.contains("is-on") && getComputedStyle(el).display !== "none"; })()'));
   check(!aOverlay, '对方留守结算页期间，A 点准备不会开始对局（服务端硬拒）');
   check(await a.isVisible('#view-room'), 'A 仍在准备页');
   const aTip = (await a.text('#room-tip')) || '';
@@ -564,7 +791,8 @@ async function run(browser) {
   log('\n[7c] 准备按钮 bug 回归（双方都不得残留 loading）');
   const readyA = await a.busyState('#btn-ready');
   const readyB = await b.busyState('#btn-ready');
-  for (const [who, st] of [['A', readyA], ['B', readyB]]) {
+  const readyStates: Array<[string, BusyState | null]> = [['A', readyA], ['B', readyB]];
+  for (const [who, st] of readyStates) {
     check(!!st, `${who} 端 #btn-ready 存在`);
     check(!!st && !st.isBusy, `${who} 端 #btn-ready 没有 is-busy 残留`);
     check(!!st && st.ariaBusy !== 'true', `${who} 端 #btn-ready 没有 aria-busy 残留`);
@@ -590,23 +818,23 @@ async function run(browser) {
   check(!(await a.isVisible('#agree-row')), '一模一样通关时不出现 #agree-row 投票区');
   const settleTitle2 = await a.text('#settle-title');
   check(/一模一样|相同|一致/.test(settleTitle2 || ''), `结算标题体现一模一样通关（${(settleTitle2 || '').trim()}）`);
-  const settleFinal2 = await a.text('#settle-final');
-  check(/彩虹/.test(settleFinal2 || ''), `结算最终词为「彩虹」（${settleFinal2.trim()}）`);
-  const rounds2 = await a.text('#settle-rounds');
-  check(/彩虹/.test(rounds2 || ''), '第二局结算逐轮列表已渲染');
+  const settleFinal2 = (await a.text('#settle-final')) ?? '';
+  check(/彩虹/.test(settleFinal2), `结算最终词为「彩虹」（${settleFinal2.trim()}）`);
+  const rounds2 = (await a.text('#settle-rounds')) ?? '';
+  check(/彩虹/.test(rounds2), '第二局结算逐轮列表已渲染');
   await a.screenshot('14-settle-same.png');
 
   log('\n[9] 移动端 375px 复查（结算页 + 首页）');
   await a.setViewport(375, 812);
   await sleep(500);
-  const overflowSettle = await a.eval('document.documentElement.scrollWidth - document.documentElement.clientWidth');
+  const overflowSettle = Number(await a.eval('document.documentElement.scrollWidth - document.documentElement.clientWidth'));
   check(overflowSettle <= 2, `375px 结算页无横向溢出（overflow=${overflowSettle}px）`);
   await a.screenshot('15-mobile-375-settle.png');
   await b.click('#btn-leave-win').catch(() => {});
   await b.waitFor('(() => { const v = document.querySelector("#view-home"); return !!v && getComputedStyle(v).display !== "none"; })()', 10000, 'B 回到首页').catch(() => {});
   await b.setViewport(375, 812);
   await sleep(400);
-  const overflowHome = await b.eval('document.documentElement.scrollWidth - document.documentElement.clientWidth');
+  const overflowHome = Number(await b.eval('document.documentElement.scrollWidth - document.documentElement.clientWidth'));
   check(overflowHome <= 2, `375px 首页无横向溢出（overflow=${overflowHome}px）`);
   await b.screenshot('16-mobile-375-home.png');
   await a.setViewport(430, 932);
@@ -623,9 +851,9 @@ async function run(browser) {
   return { a, b };
 }
 
-(async () => {
+async function main(): Promise<void> {
   fs.mkdirSync(OUT, { recursive: true });
-  let browser;
+  let browser: Browser | undefined;
   try {
     browser = await Browser.launch();
     if (SMOKE) {
@@ -642,9 +870,11 @@ async function run(browser) {
       console.log('\n✅ 全部通过');
     }
   } catch (err) {
-    console.error('\n💥 流程中断:', err.message);
+    console.error('\n💥 流程中断:', errorMessage(err));
     process.exitCode = 1;
   } finally {
     if (browser) await browser.close();
   }
-})();
+}
+
+await main();

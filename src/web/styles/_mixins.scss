@@ -1,0 +1,64 @@
+// =============================================================================
+// 可复用混入（@mixin）
+// 只抽取旧 CSS 中真实重复的声明块，输出结果与旧样式逐条等价。
+// =============================================================================
+
+@use 'variables' as *;
+
+// 玻璃面板基座：圆角 + 细描边 + 大阴影（.card / .reveal 共用）
+@mixin panel($radius: var(--radius-l), $shadow-token: var(--shadow)) {
+  border-radius: $radius;
+  border: 1px solid var(--line);
+  box-shadow: $shadow-token;
+}
+
+// 毛玻璃：backdrop-filter 与 -webkit- 前缀成对书写（旧样式固定写法）
+@mixin frosted($blur: 14px) {
+  backdrop-filter: blur($blur);
+  -webkit-backdrop-filter: blur($blur);
+}
+
+// 键盘可达性 focus ring（.btn / .btn-exit / .sound）
+@mixin focus-ring($color: var(--lime)) {
+  outline: 2px solid $color;
+  outline-offset: 2px;
+}
+
+// 按钮基座：交互骨架（.btn / .btn-exit 共用）
+@mixin button-base {
+  font-family: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+// 文本截断：单行 nowrap；多行走 -webkit-line-clamp
+@mixin truncate($lines: 1) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  @if $lines == 1 {
+    white-space: nowrap;
+  } @else {
+    display: -webkit-box;
+    -webkit-line-clamp: $lines;
+    -webkit-box-orient: vertical;
+  }
+}
+
+// 渐变文字 + 霓虹 drop-shadow（品牌字/房间码/倒计时数字/胜利判词等重复块）
+@mixin gradient-text($gradient, $glow: null) {
+  background: $gradient;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+
+  @if $glow != null {
+    filter: drop-shadow($glow);
+  }
+}
+
+// 呼吸光晕：霓虹小圆点（.dot）
+@mixin neon-dot($color: var(--cyan), $glow: 0 0 8px rgba(62, 230, 214, 0.9)) {
+  background: $color;
+  box-shadow: $glow;
+}

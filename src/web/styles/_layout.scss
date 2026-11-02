@@ -1,0 +1,54 @@
+// =============================================================================
+// 布局骨架：.app 容器、视图切换、顶栏
+// 对应 public/style.css 第 78–114 行、415–437 行
+// =============================================================================
+
+@use 'variables' as *;
+
+.app {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 32px, 520px);
+  margin-inline: auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 64px 0 40px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+
+// 四视图（首页/房间/对局/结算）默认隐藏，active 时淡入
+.view {
+  display: none;
+
+  &--active {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    animation: viewIn 0.28s ease both;
+  }
+}
+
+.topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+  min-height: 32px;
+
+  &__label {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    color: var(--muted);
+  }
+
+  &__meta {
+    font-size: 12px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+}
