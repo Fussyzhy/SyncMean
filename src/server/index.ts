@@ -89,10 +89,40 @@ const game = new Game(transport);
 
 // ==================== HTTP ====================
 
+/**
+ * v3.3：统一安全响应头。CSP 与前端现状匹配（Vue 运行时需要 'unsafe-inline'，
+ * 传输层是 socket.io 的 WebSocket，故 connect-src 放行 ws:/wss:；
+ * 导出图与复制图片会 `fetch(blob:)` / `fetch(data:)`，因此 connect-src 也放行 blob:/data:）。
+ */
+const SECURITY_HEADERS: Readonly<Record<string, string>> = {
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss: blob: data:; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+};
+
+app.use((req, res, next) => {
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+  next();
+});
+
 app.get('/health', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, rooms: game.roomCount() });
 });
+
+// 带内容哈希的构建产物：长缓存 + immutable；fallthrough:false 让缺失资源直接 404，
+// 避免被后面的 SPA 回落成 index.html（否则刷新时可能把 HTML 当成 JS/CSS 返回）。
+app.use(
+  '/assets',
+  express.static(path.join(PUBLIC_DIR, 'assets'), {
+    immutable: true,
+    maxAge: '1y',
+    fallthrough: false,
+  })
+);
 
 app.use(express.static(PUBLIC_DIR, { index: 'index.html', maxAge: 0 }));
 
@@ -235,17 +265,26 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[同声传意] 收到 ${signal}，正在关闭……`);
+  // v3.3：先给所有房间发关停通知，留 250ms 让 socket.io 把消息刷出去，再清理房间
   try {
-    game.shutdown();
+    game.announceShutdown();
   } catch (err) {
-    console.error('[同声传意] 清理房间失败', err);
+    console.error('[同声传意] 广播关停通知失败', err);
   }
-  try {
-    io.close(() => process.exit(0));
-  } catch (err) {
-    console.error('[同声传意] 关闭 Socket.IO 失败', err);
-  }
-  setTimeout(() => process.exit(0), 1500).unref();
+  setTimeout(() => {
+    try {
+      game.shutdown();
+    } catch (err) {
+      console.error('[同声传意] 清理房间失败', err);
+    }
+    try {
+      io.close(() => process.exit(0));
+    } catch (err) {
+      console.error('[同声传意] 关闭 Socket.IO 失败', err);
+    }
+  }, 250);
+  // 兜底：无论上面哪一步卡住，2s 后强制退出
+  setTimeout(() => process.exit(0), 2000).unref();
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

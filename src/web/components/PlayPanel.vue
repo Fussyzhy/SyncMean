@@ -67,7 +67,18 @@ watch(
     >
       {{ game.submitLabel }}
     </button>
-    <p id="waiting-hint" class="hint" :class="{ 'is-on': game.waitingOn }">已提交，等对方…</p>
+    <p id="waiting-hint" class="hint" :class="{ 'is-on': game.waitingOn }">
+      {{ game.waitingText }}
+    </p>
+    <button
+      v-if="game.opened && !game.showReveal && game.opponentOffline"
+      id="btn-copy-waiting"
+      class="btn btn--ghost btn--block"
+      type="button"
+      @click="game.copyInvite"
+    >
+      复制邀请链接，喊他回来
+    </button>
     <p id="opponent-hint" class="hint hint--soft" :class="{ 'is-on': game.opponentHintOn }">
       对方已经提交啦，就差你 👀
     </p>

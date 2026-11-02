@@ -180,6 +180,13 @@ function pad2(n: number): string {
   return (n < 10 ? '0' : '') + String(n);
 }
 
+/** 毫秒 → m:ss（向上取整到秒；不足 10 秒也补成 0:0X），用于「已等 m:ss」等待计时 */
+export function formatClock(ms: number): string {
+  const safe = Number.isFinite(ms) ? Math.max(0, ms) : 0;
+  const seconds = Math.ceil(safe / 1000);
+  return Math.floor(seconds / 60) + ':' + pad2(seconds % 60);
+}
+
 export function formatDateTime(ts: number): string {
   const d = new Date(ts);
   if (!isFinite(d.getTime())) return '';

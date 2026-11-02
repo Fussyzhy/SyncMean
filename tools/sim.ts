@@ -200,9 +200,15 @@ function request(urlPath: string, timeout = 3000): Promise<HttpResponse> {
   });
 }
 
-async function fetchJson(urlPath: string): Promise<{ status: number; body: HealthBody }> {
+interface HealthResult {
+  status: number;
+  body: HealthBody;
+  headers: http.IncomingHttpHeaders;
+}
+
+async function fetchJson(urlPath: string): Promise<HealthResult> {
   const res = await request(urlPath);
-  return { status: res.status, body: JSON.parse(res.body) as HealthBody };
+  return { status: res.status, body: JSON.parse(res.body) as HealthBody, headers: res.headers };
 }
 
 /* ==================== 子进程服务 ==================== */
@@ -454,6 +460,8 @@ async function main(): Promise<void> {
   eq(constants.SUBMIT_LIMIT_OPTIONS, [0, 60000, 180000, 300000], 'SUBMIT_LIMIT_OPTIONS 仅 0/1/3/5 分钟');
   ok(!hasOwn(constants, 'SUBMIT_MS'), 'constants 不再导出 SUBMIT_MS');
   ok(!hasOwn(constants, 'REVEAL_MS'), 'constants 不再导出 REVEAL_MS');
+  ok(constants.SETTLE_OFFLINE_GRACE_MS === 60000, 'SETTLE_OFFLINE_GRACE_MS = 60000');
+  ok(constants.OFFLINE_ABORT_GRACE_MS === 120000, 'OFFLINE_ABORT_GRACE_MS = 120000');
   ok(constants.START_DELAY === 300, 'START_DELAY = 300');
   ok(constants.CODE_RE.test('AB23'), '房间码格式 A-Z2-9 四位');
   ok(!constants.CODE_RE.test('AB12'), '房间码不含易混淆的 1/0/I/O');
@@ -475,10 +483,25 @@ async function main(): Promise<void> {
   eq(health0.status, 200, 'GET /health 返回 200');
   eq(health0.body, { ok: true, rooms: 0 }, '/health 返回 {ok:true, rooms:0}');
 
+  // v3.3：统一安全响应头
+  const csp = String(health0.headers['content-security-policy'] ?? '');
+  ok(csp.includes("default-src 'self'"), `CSP 含 default-src 'self'（实际 ${JSON.stringify(csp)}）`);
+  ok(csp.includes("connect-src 'self' ws: wss:"), 'CSP 放行同源与 ws/wss 连接（socket.io）');
+  ok(csp.includes("frame-ancestors 'none'"), 'CSP 禁止被 iframe 嵌套');
+  eq(health0.headers['x-content-type-options'], 'nosniff', 'X-Content-Type-Options: nosniff');
+  eq(health0.headers['x-frame-options'], 'DENY', 'X-Frame-Options: DENY');
+  eq(health0.headers['referrer-policy'], 'no-referrer', 'Referrer-Policy: no-referrer');
+  eq(
+    health0.headers['permissions-policy'],
+    'camera=(), microphone=(), geolocation=()',
+    'Permissions-Policy 关闭敏感设备权限'
+  );
+  ok(health0.headers['cache-control'] === 'no-store', '/health 仍不缓存（no-store）');
+
   const sioJs = await request('/socket.io/socket.io.js');
   eq(sioJs.status, 200, '前端可从 /socket.io/socket.io.js 加载客户端');
   ok(sioJs.body.includes('socket.io'), 'socket.io 客户端脚本内容正常');
-  pass('/health + socket.io 客户端');
+  pass('/health + 安全头 + socket.io 客户端');
 
   // ---------- 2. 输入校验 ----------
   step('2. 输入校验');
@@ -2212,6 +2235,175 @@ async function main(): Promise<void> {
   );
   gSettle5.shutdown();
   pass('lastGame / settleDismissed 内部规则');
+
+  // ---------- 18. v3.3 离线兜底（回拨 offlineAt 模拟，不等真实分钟级时间） ----------
+  step('18. 离线兜底：offlineAt 生命周期、掉线过久中止本局、结算页离线解锁');
+
+  // 18a. offlineAt 生命周期：disconnect 写入，token 重连清空，迟到的旧 socket 不覆盖
+  const gOff = new GameModule();
+  const offCreated = asOk(gOff.createRoom('off-a', { name: '甲' }));
+  gOff.joinRoom('off-b', { code: offCreated.code, name: '乙' });
+  const offRoom = gOff.rooms.get(offCreated.code) as Room;
+  const offPlayer = (seat: Seat): Player => {
+    const found = offRoom.players.find((p) => p.seat === seat);
+    if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
+    return found;
+  };
+  eq(
+    offRoom.players.map((p) => p.offlineAt),
+    [null, null],
+    'createRoom / joinRoom 新玩家 offlineAt=null'
+  );
+  gOff.disconnect('off-b');
+  const offB = offPlayer('b');
+  ok(typeof offB.offlineAt === 'number', 'disconnect 写入 offlineAt');
+  eq(
+    { connected: offB.connected, socketId: offB.socketId },
+    { connected: false, socketId: null },
+    '断线后 connected=false / socketId=null'
+  );
+  const offTokenB = offB.token;
+  eq(
+    asOk(gOff.joinRoom('off-b-new', { code: offCreated.code, name: '乙', token: offTokenB })).seat,
+    'b',
+    'token 重连恢复座位 b'
+  );
+  eq(offB.offlineAt, null, 'token 重连清空 offlineAt');
+  eq(offB.connected, true, '重连后 connected=true');
+  gOff.disconnect('off-b'); // 旧 socket 的 disconnect 迟到
+  eq(offB.offlineAt, null, '被顶替的旧 socket 迟到的 disconnect 不覆盖 offlineAt');
+  eq(offB.connected, true, '旧 socket disconnect 不把新连接标记为离线');
+
+  // 18b. 主动对局兜底：离线超过 OFFLINE_ABORT_GRACE_MS 才中止，且幂等
+  const offErrors: { seat: Seat; payload: RoomErrorPayload }[] = [];
+  gOff.emitToPlayer = (
+    player: Player,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    if (event === 'room:error') {
+      offErrors.push({ seat: player.seat, payload: payload as RoomErrorPayload });
+    }
+  };
+  offRoom.phase = 'submitting';
+  offRoom.deadline = Date.now() + 60000;
+  offRoom.submissions = { a: { word: '苹果', timedOut: false }, b: null };
+  gOff.disconnect('off-b-new');
+  offB.offlineAt = Date.now() - 1000;
+  gOff.sweep();
+  eq(offRoom.phase, 'submitting', '离线未超过 OFFLINE_ABORT_GRACE_MS：仍停在原相位');
+  ok(offRoom.deadline !== null, '未中止时 deadline 保留');
+  eq(offErrors.length, 0, '未中止时不发 room:error');
+
+  offB.offlineAt = Date.now() - constants.OFFLINE_ABORT_GRACE_MS - 1000;
+  gOff.sweep();
+  eq(offRoom.phase, 'aborted', '离线超过 OFFLINE_ABORT_GRACE_MS：本局被中止为 aborted');
+  eq(offRoom.deadline, null, '中止后 deadline=null');
+  eq(offRoom.submissions, { a: null, b: null }, '中止后 submissions 清空');
+  eq(
+    offErrors.map((entry) => ({ seat: entry.seat, code: entry.payload.code })),
+    [{ seat: 'a', code: 'OPPONENT_LEFT' }],
+    '仍在线玩家收到 room:error OPPONENT_LEFT'
+  );
+  eq(offErrors[0].payload.message, '对方掉线太久，这局结束了', '中止提示文案与规格一致');
+  const offErrorCountBefore = offErrors.length;
+  gOff.sweep();
+  eq(offErrors.length, offErrorCountBefore, '重复 sweep 幂等：不重复中止 / 不重复通知');
+  eq(offRoom.phase, 'aborted', '重复 sweep 后仍为 aborted');
+  gOff.shutdown();
+
+  // 18c. 结算页离线解锁：A 已退、B 离线过久 -> B 自动退出结算页，A 不再被锁
+  const gSettleOff = new GameModule();
+  const settleOffCreated = asOk(gSettleOff.createRoom('so-a', { name: '甲' }));
+  gSettleOff.joinRoom('so-b', { code: settleOffCreated.code, name: '乙' });
+  const settleOffRoom = gSettleOff.rooms.get(settleOffCreated.code) as Room;
+  const settleOffPlayer = (seat: Seat): Player => {
+    const found = settleOffRoom.players.find((p) => p.seat === seat);
+    if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
+    return found;
+  };
+  settleOffRoom.phase = 'won';
+  settleOffRoom.result = {
+    round: 1,
+    words: { a: '甲', b: '甲' },
+    isWin: true,
+    timedOut: { a: false, b: false },
+    agree: { a: false, b: false },
+    winBy: 'same',
+  };
+  settleOffRoom.history.push({ ...settleOffRoom.result, basis: null } as HistoryItem);
+  eq(asOk(gSettleOff.restart('so-a')).watching, true, 'A 先退出结算页，B 仍留在结算页');
+
+  gSettleOff.disconnect('so-b');
+  const settleOffB = settleOffPlayer('b');
+  const settleOffNotices: { seat: Seat; payload: NoticePayload }[] = [];
+  gSettleOff.emitToPlayer = (
+    player: Player,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    if (event === 'room:notice') {
+      settleOffNotices.push({ seat: player.seat, payload: payload as NoticePayload });
+    }
+  };
+
+  settleOffB.offlineAt = Date.now() - 1000;
+  gSettleOff.sweep();
+  eq(settleOffB.settleDismissed, false, '离线未超过 SETTLE_OFFLINE_GRACE_MS：不解锁结算页');
+  ok(settleOffRoom.lastGame !== null, '未超过宽限时 lastGame 仍保留');
+  eq(settleOffNotices.length, 0, '未解锁时不发通知');
+
+  settleOffB.offlineAt = Date.now() - constants.SETTLE_OFFLINE_GRACE_MS - 1000;
+  gSettleOff.sweep();
+  eq(settleOffB.settleDismissed, true, '离线超过 SETTLE_OFFLINE_GRACE_MS：离线者自动退出结算页');
+  eq(settleOffRoom.lastGame, null, '所有玩家均已退出结算 -> lastGame=null');
+  eq(
+    settleOffNotices.map((entry) => ({ seat: entry.seat, payload: entry.payload })),
+    [{ seat: 'a', payload: { kind: 'system', text: '对方离线太久，已自动退出结算页' } }],
+    '仍在线玩家收到「已自动退出结算页」system notice'
+  );
+  eq(gSettleOff.setReady('so-a', true), { ok: true }, '解锁后 A 的 player:ready 返回 ok');
+  const settleNoticeCountBefore = settleOffNotices.length;
+  gSettleOff.sweep();
+  eq(settleOffNotices.length, settleNoticeCountBefore, '重复 sweep 幂等：不重复解锁 / 不重复通知');
+  eq(settleOffPlayer('b').settleDismissed, true, '重复 sweep 后仍保持已退出结算页');
+  gSettleOff.shutdown();
+  pass('离线兜底（offlineAt / 掉线中止 / 结算页解锁）');
+
+  // ---------- 19. v3.3 announceShutdown 广播 ----------
+  step('19. announceShutdown：给每个房间广播 room:notice');
+  const gShut = new GameModule();
+  const shutA = asOk(gShut.createRoom('shut-a', { name: '甲' }));
+  gShut.joinRoom('shut-b', { code: shutA.code, name: '乙' });
+  const shutC = asOk(gShut.createRoom('shut-c', { name: '丙' }));
+  const shutNotices: { code: string; payload: NoticePayload }[] = [];
+  gShut.emitToRoom = (
+    roomCode: string,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    if (event === 'room:notice') {
+      shutNotices.push({ code: roomCode, payload: payload as NoticePayload });
+    }
+  };
+  gShut.announceShutdown();
+  eq(
+    shutNotices.map((entry) => entry.code).sort(),
+    [shutA.code, shutC.code].sort(),
+    '每个房间各广播一条 room:notice'
+  );
+  eq(
+    shutNotices.map((entry) => entry.payload),
+    [
+      { kind: 'system', text: '服务器正在重启，本局会中断，稍后刷新重开一局' },
+      { kind: 'system', text: '服务器正在重启，本局会中断，稍后刷新重开一局' },
+    ],
+    '关停通知 kind=system 且文案与规格一致'
+  );
+  eq(shutNotices.filter((entry) => entry.payload.kind === 'system').length, 2, '全部是 system notice');
+  eq(gShut.roomCount(), 2, 'announceShutdown 只通知、不删除房间');
+  gShut.shutdown();
+  pass('announceShutdown 广播');
 }
 
 /* ==================== 执行 ==================== */

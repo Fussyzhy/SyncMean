@@ -1,6 +1,13 @@
-# 同声传意 · 联机版 —— 协议契约 v3.1（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3.3（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3.3 变更（相对 v3.2）**：**协议事件与下发字段零变化**，只补可靠性、运维与 DOM 要求：
+> 1. **离线兜底（关键）**：主动对局（countdown / submitting / reveal）中一方断线超过 `OFFLINE_ABORT_GRACE_MS = 120000`，服务端自动中止对局（`phase='aborted'`，在线方收到 `room:error {code:'OPPONENT_LEFT'}`）。解决「不限时房间对方掉线后永久卡在 submitting」。
+> 2. **结算页离线解锁**：留守结算页的玩家断线超过 `SETTLE_OFFLINE_GRACE_MS = 60000`，服务端自动置其 `settleDismissed=true`（必要时清 `lastGame`），让已点「再来一局」的人能正常准备。解决「对方关页面后自己永远开不了新局」。
+> 3. **关停通知**：服务端关闭前向所有房间广播 `room:notice {kind:'system', text:'服务器正在重启…'}`，客户端按既有 notice 逻辑 toast。
+> 4. **运维**：所有 HTTP 响应带安全头（CSP / nosniff / frame / referrer / permissions）；`/assets/*` 带 `Cache-Control: immutable, max-age=1y`；其余静态资源保持 `max-age=0`。
+> 5. **DOM**：新增 `#opponent-offline`（对局中对方掉线横幅）与 `#btn-copy-waiting`（等待时对方离线，复制邀请链接）；`#waiting-hint` 文案升级为「已提交，等对方 · 已等 m:ss（· 对方离线）」。
 >
 > **v3.2 变更（相对 v3.1）**：
 > 1. **填词时限改为建房时由房主设定**：可选「不限时 / 1 分钟 / 3 分钟 / 5 分钟」，整局（含 `game:restart` 重开）固定，加入者不可改。`room:create` 新增可选 `submitLimitMs`；`PublicRoomState` 新增 `submitLimitMs`；`round:open.deadline` 在「不限时」时为 `null`；新增错误码 `INVALID_SUBMIT_LIMIT`。
@@ -79,22 +86,31 @@ docker-compose.yml     单实例编排（房间在内存，禁止扩副本）
 - 静态目录 `dist/public`，`GET /` 返回 `dist/public/index.html`。
 - 未匹配的路由回落到 `index.html`（保证 `/?room=ABCD` 可用）。
 - 服务端日志前缀统一为 `[同声传意]`。
+- **v3.3 运维约定**：所有 HTTP 响应带安全头（CSP `default-src 'self'`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 关闭 camera/mic/geolocation）；`dist/public/assets/**` 由单独的静态路由提供，响应 `Cache-Control: public, max-age=31536000, immutable`（文件名带 hash，可放心长缓存）；`index.html` 等其余静态资源保持 `max-age=0`（每次校验）。
+- **v3.3 关停**：SIGINT/SIGTERM 时先向所有房间广播关停 `room:notice`，延迟约 250ms 再 `io.close()`；最多 2 秒后进程退出。
 
-## 3. 时间参数（v3.2）
+## 3. 时间参数（v3.3）
 
 ```js
 const COUNTDOWN_MS       = 3000;  // 3-2-1
 const DEFAULT_SUBMIT_MS  = 60000; // 建房未指定 submitLimitMs 时的默认填词时限（1 分钟）
 const SUBMIT_LIMIT_OPTIONS = [0, 60000, 180000, 300000]; // 0=不限时，其余=1/3/5 分钟
 const START_DELAY        = 300;   // 双方准备后稍等再倒计时
+const SETTLE_OFFLINE_GRACE_MS = 60000;  // v3.3：留守结算页的人离线多久后视为已退出
+const OFFLINE_ABORT_GRACE_MS  = 120000; // v3.3：主动对局中一方离线多久后中止对局
 ```
 
 **v3.2 规则**：
 - **填词时限是房间级参数**：创建房间时由房主在 `room:create` 里通过 `submitLimitMs` 指定（必须在 `SUBMIT_LIMIT_OPTIONS` 内，缺省 `DEFAULT_SUBMIT_MS`），非法值返回 `INVALID_SUBMIT_LIMIT`。整局（多轮之间、`game:restart` 重开后）保持不变，加入者不能修改。
 - **没有「揭晓停留」计时器**：非通关时服务端进入 `reveal` 后 `deadline = null`，且不设任何 timer，无限等待，直到任一玩家发 `round:next` 才进入下一轮（3s 倒计时）。
-- **「不限时」（`submitLimitMs = 0`）**：`round:open` 的 `deadline = null`，服务端不设提交超时计时器，只有双方都 `round:submit` 才揭晓。因此一方始终不提交时，本轮会一直停在 `submitting`——这是该模式的预期行为，不做兜底。
+- **「不限时」（`submitLimitMs = 0`）**：`round:open` 的 `deadline = null`，服务端不设提交超时计时器，只有双方都 `round:submit` 才揭晓。**v3.3 补丁**：这不是无限兜底——主动对局中一方断线超过 `OFFLINE_ABORT_GRACE_MS` 会中止对局（见 §8）；双方都在线时仍不限时。
 - **计时的房间**：`round:open` 时 `deadline = 服务端 now + submitLimitMs`；到点后仍未提交的座位自动填 `{word:'词穷', timedOut:true}`，随后照常揭晓。
 - 旧版 `SUBMIT_MS` / `REVEAL_MS` 常量**删除**，不再有 60s 固定时限与 4.5s 揭晓停留。
+
+**v3.3 离线规则**（由 `sweep()` 周期扫描执行，扫描间隔 30s）：
+- 主动对局（`countdown` / `submitting` / `reveal`，2 人房）中任一玩家 `connected=false` 且离线时长 ≥ `OFFLINE_ABORT_GRACE_MS` → 中止对局：`phase='aborted'`、`deadline=null`、清空 submissions 与结算快照，仍在线的一方收到 `room:error {code:'OPPONENT_LEFT'}`，随后广播 state。
+- 结算页（`room.lastGame` 存在）中未退出结算页的玩家 `connected=false` 且离线时长 ≥ `SETTLE_OFFLINE_GRACE_MS` → 自动置 `settleDismissed=true`；当所有玩家都已退出 → `lastGame=null`；仍在线的人收到 `room:notice {kind:'system', text:'对方离线太久，已自动退出结算页'}`。离线玩家重连后看到的是真实 lobby（不会再回到结算页）。
+- 断线后重连（带 token `room:join`）会清除离线计时，因此短暂掉线/切后台不会被误判。
 
 ## 4. 服务端数据模型（内部，不下发）
 
@@ -115,7 +131,7 @@ Room {
   createdAt: number
 }
 Snapshot { round, basis:{a,b}|null, history:[HistoryItem], result:Result, endedAt:number }
-Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean }
+Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean, offlineAt:number|null } // v3.3：offlineAt 仅内部使用，用于离线兜底判定
 Result  { round, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy:'same'|'agree'|null }
 HistoryItem { round, basis:{a,b}|null, words:{a,b}, isWin, agree:{a,b}, winBy:'same'|'agree'|null }
 ```
@@ -222,6 +238,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 - `game:restart` 语义变为「我退出结算页」：
   1. 首次有人退出（内部 `phase==='won'`）：先把整局冻结进 `lastGame`，再把房间内部重置为 `lobby`（`round=1`、`basis=null`、`submissions/agree/result/history` 清空、`deadline=null`、所有 `ready=false`——与旧行为相同），并置**点击者** `settleDismissed=true`、其余人 `false`。
   2. 后续有人退出（内部已是 `lobby`）：只把自己 `settleDismissed=true`；当**房间内所有玩家**都已退出 → `lastGame=null`。
+- **v3.3 离线解锁（关键）**：留守结算页的玩家（`settleDismissed===false`）断线超过 `SETTLE_OFFLINE_GRACE_MS`（60s）后，`sweep()` 自动把它当作已退出：置 `settleDismissed=true`；若所有玩家都已退出则 `lastGame=null`；仍在线的人收到系统 notice「对方离线太久，已自动退出结算页」。这样已点「再来一局」的人不会被关页面走人的对方永久锁在准备页。离线者重连后看到真实 lobby（不再回到结算页）。
 - **视角门控（关键）**：`getState(room, player)` 里，若 `room.lastGame && !player.settleDismissed`，则该玩家看到的 state 为「won 视角」：`phase:'won'`、`round/basis/history/result` 全部取自 `lastGame`、`deadline:null`、`submitted` 与 `agree` 全 false（`submitLimitMs` 仍下发房间真实值）。已退出的人看到真实房间状态。因此前端**仍然只按 `state.phase` 决定渲染哪一屏**，不需要新增分支。
 - 因为看到 `phase:'won'`，未退出的人自然点不到「准备」；服务端还必须**硬拒**：`player:ready` 对「`lastGame` 存在且本人 `settleDismissed===false`」的玩家返回 `BAD_PHASE`（防止陈旧或被改过的前端绕过）。
 - 对局不可能在有人还在看结算时开始：`_scheduleStart` 需要两人都 ready，而未退出者无法 ready；另外 `_startCountdown` 强制 `lastGame=null` 且所有人 `settleDismissed=false`（兜底）。
@@ -281,11 +298,15 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 
 ## 8. 断线 / 离开
 
-- socket 断开：玩家标记 `connected:false`，广播 state；房间保留。对局继续（对方可等，超时自动提交兜底）。
+- socket 断开：玩家标记 `connected:false` 并记录 `offlineAt`，广播 state；房间保留。对局继续（计时房间仍按超时自动提交兜底）。
+- **v3.3 离线兜底**：主动对局（`countdown` / `submitting` / `reveal`）中一方离线 ≥ `OFFLINE_ABORT_GRACE_MS`（120s）→ 对局中止：`phase='aborted'`、`deadline=null`、清空 submissions 与结算快照，仍在线的一方收到 `room:error {code:'OPPONENT_LEFT', message:'对方掉线太久，这局结束了'}`。这是「不限时」房间不能永久卡在 submitting 的最终保底。
+- **v3.3 结算页离线解锁**：结算页留守者离线 ≥ `SETTLE_OFFLINE_GRACE_MS`（60s）→ 自动退出结算页（细则见 §5.3.1）。
+- **重连**：带 token `room:join` 命中房间内玩家 → 恢复座位并清空 `offlineAt`；短暂掉线/切后台不会被离线兜底误判。
 - 主动 `room:leave` 或双断线清理：若剩余 0 人 → 删除房间；剩余 1 人在进行中 → 该玩家收到 `room:error {code:'OPPONENT_LEFT'}`, `state.phase='aborted'`。
 - host 离开 → 剩余玩家 `isHost=true`。
 - 空房间 / 全员离线超 10 分钟：清理（周期扫描）。
 - reveal 等待期间对方离开：同样走 `aborted`。
+- **v3.3 关停通知**：进程收到 SIGINT/SIGTERM 时先向所有房间广播 `room:notice {kind:'system', text:'服务器正在重启，本局会中断，稍后刷新重开一局'}`，约 250ms 后再关闭 socket 连接（见 §2）。
 
 ## 9. 必须存在的 DOM id（自动化验收用，前端不得改名）
 
@@ -303,6 +324,14 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 ```
 #submit-limit-group   首页创建房间的时限选择组（role=radiogroup；四个选项按钮带 data-limit-ms="0|60000|180000|300000"，选中态 class is-active / aria-checked=true）
 #room-limit           房间页展示「本局填词时限：…」（加入者也能看到房主的设定）
+```
+
+**v3.3 新增（等待与离线）**：
+
+```
+#waiting-hint         等待提示（文案含「已提交，等对方 · 已等 m:ss」，对方离线时追加「 · 对方离线」）
+#btn-copy-waiting     等待且对方离线时出现的「复制邀请链接，喊他回来」按钮
+#opponent-offline     对局视图中对方掉线时的提示横幅（role=status、aria-live=polite；对方重连后消失）
 ```
 
 **v2 新增（同意词投票）**，位于对局视图的揭晓面板内：
@@ -351,9 +380,10 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
-11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit 这些 DOM id 必须存在。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit / #opponent-offline / #btn-copy-waiting 这些 DOM id 必须存在。
 12. **明暗模式（v3.1）**：无存储时跟随系统 `prefers-color-scheme`；系统能力不可用（无 `matchMedia`）时**兜底明亮**；`#btn-theme` 单击切换并把 `321:theme` 写入 localStorage，刷新后保持；Shift+单击清除存储回到「跟随系统」；深浅两套主题的 `body` 背景色不同、正文与按钮文字对比度 ≥ 4.5:1；`<html data-theme>`、`data-theme-source` 与 `<meta name="theme-color">` 同步更新。
 13. **填词时限（v3.2）**：`yarn test` 断言——默认创建（不传 `submitLimitMs`）时 `state.submitLimitMs===60000` 且 `round:open.deadline ≈ now+60000`；创建传 `180000` 时 `state.submitLimitMs===180000`、`round:open.deadline-now ∈ [170000,182000]`；非法值（如 `90000`、字符串）返回 `INVALID_SUBMIT_LIMIT`；传 `0` 时 `round:open.deadline===null`、等待一段时间仍停在 `submitting` 且不自动揭晓、双方提交后正常 `round:reveal`；`game:restart` 后新 lobby 的 `state.submitLimitMs` 与建房时一致。浏览器验收需覆盖：首页可选四种时限、房间页 `#room-limit` 显示正确、不限时房间 `#timer` 显示「不限时」且无进度条、揭晓后无自动跳转（停留超过原 4.5s 仍在 reveal，`#btn-next` 可手动进入下一轮）。
+14. **离线兜底（v3.3）**：`yarn test` 断言——`disconnect` 后记录 `offlineAt`、带 token 重连后清空；`offlineAt` 回拨超过 `OFFLINE_ABORT_GRACE_MS` 后 `sweep()` → `phase='aborted'`、`deadline=null`、在线方收到 `room:error{code:'OPPONENT_LEFT'}`（未超时则相位不变）；A `game:restart` 后 B 断线、B 的 `offlineAt` 回拨超过 `SETTLE_OFFLINE_GRACE_MS` → `sweep()` 后 `B.settleDismissed=true`、`lastGame=null`、A 的 `player:ready` 成功（未超时仍被拒）；`Game.announceShutdown()` 对每个房间广播 `room:notice`。HTTP：`/health` 响应含 CSP（`default-src 'self'`）、`x-content-type-options: nosniff`、`referrer-policy: no-referrer`；生产构建下 `/assets/*` 的 `Cache-Control` 同时含 `immutable` 与 `max-age=31536000`。浏览器验收：提交后等待提示包含「等对方」与「已等 m:ss」；对手掉线后对局页出现 `#opponent-offline`。
 
 ## 11. 导出图片契约（纯前端）
 

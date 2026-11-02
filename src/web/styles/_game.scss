@@ -33,6 +33,20 @@
   }
 }
 
+// ---- 对局中对方掉线横幅（警示色文字 + 中性控件面，深浅主题都可见） ----
+.game-alert {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: $radius-chip;
+  border: 1px solid var(--line);
+  background: var(--surface-control);
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+}
+
 // ---- 本轮联想依据 ----
 .basis {
   padding: 16px 18px;

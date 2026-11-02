@@ -48,6 +48,7 @@ import {
   buildSettleModel,
   findMe,
   findPlayer,
+  formatClock,
   normalizeCode,
   opponentWatchingSettle,
   resolveWinBy,
@@ -141,6 +142,8 @@ function createGameSession() {
   const exportBusy = ref(false);
   const localSubmitted = ref(false);
   const opponentSubmitted = ref(false);
+  /** 本轮自己提交成功的时刻（ms）；0 = 本轮还没提交 / 已换轮，用于「已等 m:ss」等待计时 */
+  const submittedAt = ref(0);
   /** 创建房间时房主选定的填词时限（仅建房生效；进房后以 state.submitLimitMs 为准） */
   const submitLimitMs = ref<SubmitLimitMs>(DEFAULT_SUBMIT_MS);
   const agreeAck = ref<AgreeAck | null>(null);
@@ -172,6 +175,16 @@ function createGameSession() {
   const opponent = computed<PublicPlayer | null>(
     () => players.value.find((p) => p && !p.isYou) || null,
   );
+  /** 对方是否在线（state.players[].connected 为准；没进房时恒 false） */
+  const opponentConnected = computed(() => {
+    const op = opponent.value;
+    return !!op && op.connected === true;
+  });
+  /** 对方已进房但掉线（仅用于对局中提示，不等同于「还没进来」） */
+  const opponentOffline = computed(() => {
+    const op = opponent.value;
+    return !!op && !op.connected;
+  });
 
   function resolutionFor(st: PublicRoomState | null): Result | null {
     if (!st) return null;
@@ -319,6 +332,16 @@ function createGameSession() {
     return '倒计时结束就能写啦';
   });
   const waitingOn = computed(() => opened.value && !showReveal.value && submittedYou.value);
+  /** 等待仪表盘文案：已提交，等对方 · 已等 m:ss（· 对方离线）；未提交/已揭晓时为空串 */
+  const waitingText = computed(() => {
+    if (!waitingOn.value) return '';
+    let text = '已提交，等对方';
+    if (submittedAt.value) {
+      text += ' · 已等 ' + formatClock(now.value - submittedAt.value);
+    }
+    if (opponentOffline.value) text += ' · 对方离线';
+    return text;
+  });
   const opponentHintOn = computed(
     () => opened.value && !showReveal.value && !submittedYou.value && opponentDone.value,
   );
@@ -539,6 +562,7 @@ function createGameSession() {
       lastRound = round;
       localSubmitted.value = false;
       opponentSubmitted.value = false;
+      submittedAt.value = 0;
       lastReveal.value = null;
       revealRound = 0;
       winRound = 0;
@@ -558,6 +582,7 @@ function createGameSession() {
     if (next.phase === 'lobby') {
       localSubmitted.value = false;
       opponentSubmitted.value = false;
+      submittedAt.value = 0;
       lastReveal.value = null;
       revealRound = 0;
       winRound = 0;
@@ -592,6 +617,7 @@ function createGameSession() {
     state.value = null;
     localSubmitted.value = false;
     opponentSubmitted.value = false;
+    submittedAt.value = 0;
     lastRound = 0;
     lastReveal.value = null;
     revealRound = 0;
@@ -771,6 +797,7 @@ function createGameSession() {
         return;
       }
       localSubmitted.value = true;
+      submittedAt.value = Date.now();
       sound.submit();
     });
     return true;
@@ -822,6 +849,7 @@ function createGameSession() {
       resetAllLoading();
       localSubmitted.value = false;
       opponentSubmitted.value = false;
+      submittedAt.value = 0;
       revealRound = 0;
       winRound = 0;
       lastReveal.value = null;
@@ -1070,6 +1098,7 @@ function createGameSession() {
     exportBusy,
     localSubmitted,
     opponentSubmitted,
+    submittedAt,
     settleAt,
     exportPreviewUrl,
     joinFocusTick,
@@ -1080,6 +1109,8 @@ function createGameSession() {
     players,
     me,
     opponent,
+    opponentConnected,
+    opponentOffline,
     result,
     winBy,
     showReveal,
@@ -1109,6 +1140,7 @@ function createGameSession() {
     submitLabel,
     wordPlaceholder,
     waitingOn,
+    waitingText,
     opponentHintOn,
     timerVisible,
     timerWidth,

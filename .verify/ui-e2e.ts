@@ -7,6 +7,7 @@
  * 迁移说明：本文件由 .verify/ui-e2e.js（只读蓝本）1:1 迁移为 TypeScript，
  * 保留全部 63 条对局 check（+ --smoke 1 条），未放宽任何断言；DOM id 与 PROTOCOL.md §9 一致。
  * v3.2 追加：建房填词时限（默认 / 不限时）、不限时房间计时区、揭晓不自动推进、375px 时限选择组。
+ * v3.3 追加：安全响应头与 /assets 长缓存、等待仪表盘（已等 m:ss）、对手掉线横幅与复制邀请入口。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -387,6 +388,11 @@ class Page {
     await sleep(400);
   }
 
+  /** 关闭标签页（模拟玩家直接关掉页面：WebSocket 会真正断开，触发服务端离线兜底） */
+  async close(): Promise<void> {
+    await this.b.send('Target.closeTarget', { targetId: this.targetId });
+  }
+
   /** 在页面里求值；页面脚本异常直接抛出（与旧脚本一致） */
   async eval(expression: string): Promise<unknown> {
     const r = await this.send<EvaluateResult>('Runtime.evaluate', {
@@ -627,6 +633,32 @@ interface RoundOptions {
 }
 
 async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
+  log('\n[0] 运维响应头与静态缓存（Node 侧）');
+  const rootRes = await fetch(APP_URL + '/');
+  const rootCsp = String(rootRes.headers.get('content-security-policy') || '');
+  check(rootRes.ok, `GET / 返回 200（实际 ${rootRes.status}）`);
+  check(/default-src 'self'/.test(rootCsp), "首页带 CSP（default-src 'self'）");
+  check(/frame-ancestors 'none'/.test(rootCsp), 'CSP 含 frame-ancestors none');
+  check((rootRes.headers.get('x-content-type-options') || '') === 'nosniff', 'X-Content-Type-Options: nosniff');
+  check((rootRes.headers.get('referrer-policy') || '') === 'no-referrer', 'Referrer-Policy: no-referrer');
+  const healthRes = await fetch(APP_URL + '/health');
+  check(
+    (healthRes.headers.get('content-security-policy') || '').includes("default-src 'self'"),
+    '/health 响应也带 CSP'
+  );
+  const rootHtml = await rootRes.text();
+  const assetMatch = rootHtml.match(/\/assets\/[^"']+\.js/);
+  check(!!assetMatch, '首页引用带 hash 的 assets/*.js');
+  if (assetMatch) {
+    const assetRes = await fetch(APP_URL + assetMatch[0]);
+    const assetCache = String(assetRes.headers.get('cache-control') || '');
+    check(assetRes.ok, `静态资源可访问（${assetMatch[0]}）`);
+    check(
+      /immutable/.test(assetCache) && /max-age=31536000/.test(assetCache),
+      `静态资源长缓存（Cache-Control: ${assetCache}）`
+    );
+  }
+
   log('\n[1] 玩家 A 打开首页');
   const a = await browser.newPage();
   // 主流程固定为「系统深色」：视觉基线稳定，也让深色主题成为被回归验证的那一套
@@ -711,6 +743,7 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
 
   // 完整跑一轮「提交→双盲→揭晓」；advance=true 则揭晓后手动进下一轮。
   let timerChecked = false;
+  let waitingChecked = false;
   async function playRound(wa: string, wb: string, o?: RoundOptions): Promise<void> {
     const opt = o || {};
     await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'A 输入开放（' + wa + '）');
@@ -723,6 +756,14 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
     await a.type('#word-input', wa);
     await a.click('#btn-submit');
     await sleep(500);
+    if (!waitingChecked) {
+      waitingChecked = true;
+      const waitingText = ((await a.text('#waiting-hint')) || '').trim();
+      check(
+        /已提交/.test(waitingText) && /等对方/.test(waitingText) && /已等\s*\d+:\d\d/.test(waitingText),
+        `等待仪表盘显示已等时长（"${waitingText}"）`
+      );
+    }
     const bText = await b.bodyText();
     check(!bText.includes(wa), '双盲：B 提交前看不到 A 的词「' + wa + '」');
     check(/对方|等待|已提交/.test(bText), 'B 端有「对方已提交/等待」的提示');
@@ -1081,6 +1122,20 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   const ePageErrors = [...e.pageErrors, ...f.pageErrors];
   check(eConsole.length === 0, `不限时房间页面无 console error（${eConsole.length} 条）`);
   check(ePageErrors.length === 0, `不限时房间页面无未捕获异常（${ePageErrors.length} 条）`);
+
+  log('\n[13] v3.3 离线兜底 UI：对手掉线横幅 + 等待时复制邀请入口');
+  await f.close();
+  const offlineBanner = await e
+    .waitFor('!!document.querySelector("#opponent-offline")', 10000, '对手掉线横幅')
+    .catch(() => false);
+  check(offlineBanner !== false, '对手掉线后对局页出现 #opponent-offline 提示');
+  await e.waitFor(
+    '(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()',
+    15000,
+    'E 下一轮输入开放（对手离线）'
+  );
+  check(await e.isVisible('#btn-copy-waiting'), '对手离线且等待时显示「复制邀请链接」入口 #btn-copy-waiting');
+  check(await e.isVisible('#opponent-offline'), '输入开放后对手掉线横幅仍然可见');
 
   return { a, b };
 }

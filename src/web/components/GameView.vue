@@ -29,6 +29,16 @@ const game = useGameSession();
       <button id="btn-exit" class="btn-exit" type="button" @click="game.leaveRoom">退出</button>
     </header>
 
+    <p
+      v-if="game.opponentOffline"
+      id="opponent-offline"
+      class="game-alert"
+      role="status"
+      aria-live="polite"
+    >
+      对方掉线了，正在等他回来…
+    </p>
+
     <div id="basis" class="basis">
       <p class="basis__label">本轮联想依据</p>
       <p class="basis__text">{{ game.basisView.text }}</p>

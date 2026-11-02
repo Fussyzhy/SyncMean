@@ -47,6 +47,10 @@ const START_DELAY = 300; // 双方准备后稍等再倒计时
 const OFFLINE_ROOM_TTL_MS = 10 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 30 * 1000;
 
+// 离线兜底宽限：结算页离线自动退出 / 对局中离线过久自动中止
+const SETTLE_OFFLINE_GRACE_MS = 60 * 1000;
+const OFFLINE_ABORT_GRACE_MS = 120 * 1000;
+
 // ==================== 业务常量 ====================
 const CODE_LENGTH = 4;
 // 4 位房间码字符集：A-Z + 2-9，排除容易混淆的 0/O/1/I
@@ -55,6 +59,9 @@ const CODE_RE = /^[A-Z2-9]{4}$/;
 const NAME_MAX = 12;
 const WORD_MAX = 12;
 const TIMEOUT_WORD = '词穷';
+
+/** v3.3：处于「进行中对局」的相位；离线过久需要被中止的就是这些相位 */
+const ACTIVE_PHASES: readonly Phase[] = ['countdown', 'submitting', 'reveal'];
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   INVALID_NAME: '昵称需为 1–12 个字符',
@@ -77,6 +84,8 @@ export const constants = {
   START_DELAY,
   OFFLINE_ROOM_TTL_MS,
   SWEEP_INTERVAL_MS,
+  SETTLE_OFFLINE_GRACE_MS,
+  OFFLINE_ABORT_GRACE_MS,
   DEFAULT_SUBMIT_MS,
   SUBMIT_LIMIT_OPTIONS,
   CODE_ALPHABET,
@@ -104,6 +113,8 @@ export interface Player {
   isHost: boolean;
   /** v2.1：本玩家是否已退出结算页（挂在玩家对象上，断线重连后仍保持） */
   settleDismissed: boolean;
+  /** v3.3：本次离线开始时刻（毫秒）；在线 / 从未离线时为 null。用于离线兜底判定 */
+  offlineAt: number | null;
 }
 
 /** v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角 */
@@ -291,6 +302,19 @@ export class Game {
     for (const code of Array.from(this.rooms.keys())) this._deleteRoom(code);
   }
 
+  /**
+   * v3.3：进程关停前通知所有房间。服务重启会中断进行中的对局，
+   * 让前端能提示玩家稍后刷新重开（不改变任何房间状态）。
+   */
+  announceShutdown(): void {
+    for (const room of this.rooms.values()) {
+      this._emitRoom(room, 'room:notice', {
+        kind: 'system',
+        text: '服务器正在重启，本局会中断，稍后刷新重开一局',
+      });
+    }
+  }
+
   // ==================== 客户端动作 ====================
 
   createRoom(
@@ -313,6 +337,7 @@ export class Game {
       connected: true,
       isHost: true,
       settleDismissed: false, // v2.1：是否已退出结算页（PROTOCOL.md §5.3.1）
+      offlineAt: null, // v3.3：新建玩家在线，尚未离线
     };
 
     const room: Room = {
@@ -355,6 +380,7 @@ export class Game {
         const oldSocketId = existing.socketId;
         existing.socketId = socketId || null;
         existing.connected = true;
+        existing.offlineAt = null; // v3.3：重连成功，离线计时清零
         room.allOfflineAt = null;
         room.lastActivityAt = Date.now();
         if (oldSocketId && oldSocketId !== existing.socketId) {
@@ -392,6 +418,7 @@ export class Game {
       connected: true,
       isHost: room.players.length === 0 || !room.players.some((p) => p.isHost),
       settleDismissed: false, // v2.1：新玩家从不属于上一局的结算页
+      offlineAt: null, // v3.3：新玩家在线，尚未离线
     };
     room.players.push(player);
     // v2.1：新玩家加入同一房间 → 上一局的结算快照作废，没人该卡在假 won
@@ -623,6 +650,7 @@ export class Game {
 
     player.connected = false;
     player.socketId = null;
+    player.offlineAt = Date.now(); // v3.3：记录离线起点，供 sweep 的两段离线兜底使用
     room.lastActivityAt = Date.now();
     if (room.players.every((p) => !p.connected)) room.allOfflineAt = Date.now();
     this.broadcastState(room);
@@ -636,15 +664,69 @@ export class Game {
     for (const code of Array.from(this.rooms.keys())) {
       const room = this.rooms.get(code);
       if (!room) continue;
+      // 1) 0 人房间立即删除（原有行为）
       if (room.players.length === 0) {
         this._deleteRoom(code);
         continue;
       }
+      // 2) 全员离线超过 TTL 删除（原有行为；删掉后无需再做兜底）
       const allOffline = room.players.every((p) => !p.connected);
       if (allOffline && room.allOfflineAt && now - room.allOfflineAt >= OFFLINE_ROOM_TTL_MS) {
         this._deleteRoom(code);
+        continue;
       }
+      // 3) 主动对局兜底：一方离线太久 -> 本局中止（幂等）
+      this._sweepActiveRoundOffline(room, now);
+      // 4) 结算页兜底：离线太久自动退出结算页（幂等）
+      this._sweepSettleOffline(room, now);
     }
+  }
+
+  /** 掉线过久中止本局：仅 countdown / submitting / reveal，且宽限期已过 */
+  _sweepActiveRoundOffline(room: Room, now: number): void {
+    if (!ACTIVE_PHASES.includes(room.phase)) return;
+    if (room.players.length !== 2) return;
+    const dropped = room.players.some(
+      (p) => !p.connected && p.offlineAt != null && now - p.offlineAt >= OFFLINE_ABORT_GRACE_MS
+    );
+    if (!dropped) return;
+
+    this._clearTimer(room);
+    room.phase = 'aborted';
+    room.deadline = null;
+    room.submissions = { a: null, b: null };
+    this._clearSettle(room);
+    for (const p of room.players) {
+      if (!p.connected) continue;
+      this._emitPlayer(p, 'room:error', {
+        code: 'OPPONENT_LEFT',
+        message: '对方掉线太久，这局结束了',
+      });
+    }
+    this.broadcastState(room);
+  }
+
+  /** 结算页离线兜底：a 已退、b 掉线太久 -> b 自动退出结算页，避免 a 被永久锁住 */
+  _sweepSettleOffline(room: Room, now: number): void {
+    if (!room.lastGame) return;
+    let changed = false;
+    for (const p of room.players) {
+      if (p.settleDismissed || p.connected || p.offlineAt == null) continue;
+      if (now - p.offlineAt < SETTLE_OFFLINE_GRACE_MS) continue;
+      p.settleDismissed = true;
+      changed = true;
+    }
+    if (!changed) return;
+
+    if (room.players.every((p) => p.settleDismissed)) room.lastGame = null;
+    for (const p of room.players) {
+      if (!p.connected) continue;
+      this._emitPlayer(p, 'room:notice', {
+        kind: 'system',
+        text: '对方离线太久，已自动退出结算页',
+      });
+    }
+    this.broadcastState(room);
   }
 
   // ==================== 视图 ====================
