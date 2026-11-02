@@ -11,6 +11,7 @@
  */
 
 import { computed, reactive, ref } from 'vue';
+import { DEFAULT_SUBMIT_MS, SUBMIT_LIMIT_OPTIONS } from '@shared/protocol';
 import type {
   AgreePair,
   PublicPlayer,
@@ -18,6 +19,7 @@ import type {
   Result,
   RevealPayload,
   Seat,
+  SubmitLimitMs,
   WinBy,
   CountdownPayload,
   RoundOpenPayload,
@@ -46,7 +48,6 @@ import {
   buildSettleModel,
   findMe,
   findPlayer,
-  isRevealFrozen,
   normalizeCode,
   opponentWatchingSettle,
   resolveWinBy,
@@ -56,8 +57,21 @@ import {
 } from '@/lib/format';
 import { copyPoster, exportCapability, exportPoster } from '@/lib/exportImage';
 
-/** 与 PROTOCOL §3 SUBMIT_MS 一致，仅用于进度条比例 */
-const SUBMIT_MS = 60000;
+/** 填词时限的中文文案（0 = 不限时）；白名单外的值按分钟/秒兜底，避免显示原始毫秒 */
+const SUBMIT_LIMIT_LABELS: Record<number, string> = {
+  0: '不限时',
+  60000: '1 分钟',
+  180000: '3 分钟',
+  300000: '5 分钟',
+};
+
+function submitLimitLabel(ms: number): string {
+  const known = SUBMIT_LIMIT_LABELS[ms];
+  if (known) return known;
+  if (ms <= 0) return '不限时';
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? seconds + ' 秒' : Math.round(seconds / 60) + ' 分钟';
+}
 
 /** v2.1 §5.3.1：对方还留在结算页时，准备页的统一提示（tip 与按钮 tooltip 共用同一句） */
 const SETTLE_WATCH_TIP = '对方还在看上一局的结算，等你俩都点『再来一局』才能开始～';
@@ -88,6 +102,12 @@ interface BasisView {
   sub: string;
   a: string;
   b: string;
+}
+
+interface SubmitLimitOption {
+  ms: SubmitLimitMs;
+  label: string;
+  active: boolean;
 }
 
 function otherSeat(seat: Seat): Seat {
@@ -121,6 +141,8 @@ function createGameSession() {
   const exportBusy = ref(false);
   const localSubmitted = ref(false);
   const opponentSubmitted = ref(false);
+  /** 创建房间时房主选定的填词时限（仅建房生效；进房后以 state.submitLimitMs 为准） */
+  const submitLimitMs = ref<SubmitLimitMs>(DEFAULT_SUBMIT_MS);
   const agreeAck = ref<AgreeAck | null>(null);
   const settleAt = ref(0);
   const openRound = ref(0);
@@ -176,7 +198,6 @@ function createGameSession() {
     if (st.phase === 'countdown' || st.phase === 'lobby' || st.phase === 'aborted') return false;
     return !!result.value;
   });
-  const revealFrozen = computed(() => isRevealFrozen(state.value));
 
   const verdictText = computed(() => {
     const res = result.value;
@@ -213,6 +234,23 @@ function createGameSession() {
   const roomPhaseText = computed(() =>
     state.value ? players.value.length + ' / 2 人' : '1 / 2 人',
   );
+  /** 房间实际生效的填词时限：state 到手后以服务端为准，未到时先用本地建房选择兜底 */
+  const roomSubmitLimitMs = computed<number>(() => {
+    const st = state.value;
+    if (st && typeof st.submitLimitMs === 'number') return st.submitLimitMs;
+    return submitLimitMs.value;
+  });
+  /** 首页「填词时限」选项（含选中态），供 HomeView 渲染 */
+  const submitLimitOptions = computed<SubmitLimitOption[]>(() =>
+    SUBMIT_LIMIT_OPTIONS.map((ms) => ({
+      ms,
+      label: submitLimitLabel(ms),
+      active: submitLimitMs.value === ms,
+    })),
+  );
+  const submitLimitText = computed(() => submitLimitLabel(roomSubmitLimitMs.value));
+  /** 本局不限时：没有截止时间，双方都提交才揭晓 */
+  const timerUnlimited = computed(() => roomSubmitLimitMs.value <= 0);
   const readyPressed = computed(() => !!(me.value && me.value.ready));
   const watchingSettle = computed(() => opponentWatchingSettle(state.value, opponent.value));
   const readyDisabled = computed(() => {
@@ -286,23 +324,38 @@ function createGameSession() {
   );
 
   const submitRemain = computed(() => {
+    const total = roomSubmitLimitMs.value;
+    // 不限时：没有截止时刻，进度条/倒计时都按 0 处理
+    if (total <= 0) return 0;
     const st = state.value;
-    if (!st) return SUBMIT_MS;
+    if (!st) return total;
     const fallbackOpen = st.phase === 'countdown' && openRound.value === Number(st.round);
-    if (st.phase !== 'submitting' && !fallbackOpen) return SUBMIT_MS;
-    const deadline = st.phase === 'submitting' ? Number(st.deadline) : Number(openDeadline.value);
-    if (!deadline) return SUBMIT_MS;
+    if (st.phase !== 'submitting' && !fallbackOpen) return total;
+    const deadline = st.phase === 'submitting' ? st.deadline : openDeadline.value;
+    // round:open 的 deadline 可能为 null（不限时），也可能还没到：都回落到整段时限
+    if (typeof deadline !== 'number' || !deadline) return total;
     let remain = deadline - now.value;
-    if (remain > SUBMIT_MS) remain = SUBMIT_MS;
+    if (remain > total) remain = total;
     if (remain < 0) remain = 0;
     return remain;
   });
   const timerVisible = computed(() => opened.value && !showReveal.value);
-  const timerWidth = computed(() => ((submitRemain.value / SUBMIT_MS) * 100).toFixed(1) + '%');
-  const timerLow = computed(() => submitRemain.value <= 10000);
-  const timerText = computed(() =>
-    submitRemain.value <= 0 ? '时间到，等揭晓…' : Math.ceil(submitRemain.value / 1000) + ' 秒',
-  );
+  const timerWidth = computed(() => {
+    const total = roomSubmitLimitMs.value;
+    if (total <= 0) return '0%';
+    return ((submitRemain.value / total) * 100).toFixed(1) + '%';
+  });
+  const timerLow = computed(() => !timerUnlimited.value && submitRemain.value <= 10000);
+  const timerText = computed(() => {
+    if (timerUnlimited.value) return '不限时';
+    const remain = submitRemain.value;
+    if (remain <= 0) return '时间到，等揭晓…';
+    const seconds = Math.ceil(remain / 1000);
+    if (seconds < 60) return seconds + ' 秒';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  });
 
   const roundLabel = computed(() => '第 ' + (Number(state.value && state.value.round) || 1) + ' 轮');
   const gameCode = computed(() => (state.value && state.value.code) || '----');
@@ -359,22 +412,12 @@ function createGameSession() {
     return '觉得这两个词说的是一回事？你确认后，等对方也确认就通关。';
   });
 
-  function freezeHint(): string {
-    const v = agreeView.value;
-    if (v.you && !v.opponent) return '你已确认，等对方也确认；点下面按钮可先进下一轮';
-    if (v.opponent && !v.you) return '对方已确认同意词；点下面按钮可先进下一轮';
-    return '同意词投票已暂停自动推进，点下面按钮进入下一轮';
-  }
-
   const nextVisible = computed(() => showReveal.value && phase.value !== 'won');
+  /** 揭晓阶段永不自动推进：只提示玩家点按钮 */
   const nextHintText = computed(() => {
     const st = state.value;
     if (!st || !showReveal.value || st.phase === 'won') return '';
-    if (revealFrozen.value) return freezeHint();
-    const deadline = Number(st.deadline);
-    if (!deadline) return '下一轮马上开始…';
-    const left = Math.max(0, deadline - now.value);
-    return left > 0 ? '下一轮 ' + Math.ceil(left / 1000) + ' 秒后自动开始' : '下一轮马上开始…';
+    return '揭晓后不会自动推进，看完点下面按钮进入下一轮';
   });
 
   /* ---------------- 派生：loading / 历史 / 结算 ---------------- */
@@ -581,31 +624,42 @@ function createGameSession() {
     return name;
   }
 
+  /** 只接受白名单里的时限（0 / 1 / 3 / 5 分钟），非法值直接忽略 */
+  function setSubmitLimit(ms: number): void {
+    const next = SUBMIT_LIMIT_OPTIONS.find((item) => item === ms);
+    if (next === undefined) return;
+    submitLimitMs.value = next;
+  }
+
   function createRoom(name: string): void {
     if (pendingCreate.value) return;
     ignoreState = false;
     pendingCreate.value = true;
-    socketApi.emitAck('room:create', { name, token: token.value }, (res) => {
-      pendingCreate.value = false;
-      if (!res.ok) {
-        toastApi.toast(res.message || '建房失败了，再试一次');
-        return;
-      }
-      leaving = false;
-      session.value = {
-        code: res.code,
-        token: res.token || token.value,
-        name,
-        seat: res.seat || 'a',
-      };
-      saveSession(session.value);
-      // 服务器可能先广播 room:state 再回 ack，此时房间已经渲染好了
-      if (!state.value || state.value.code !== res.code) {
-        state.value = null;
-        view.value = 'room';
-      }
-      toastApi.toast('房间建好了，把码发给朋友～');
-    });
+    socketApi.emitAck(
+      'room:create',
+      { name, token: token.value, submitLimitMs: submitLimitMs.value },
+      (res) => {
+        pendingCreate.value = false;
+        if (!res.ok) {
+          toastApi.toast(res.message || '建房失败了，再试一次');
+          return;
+        }
+        leaving = false;
+        session.value = {
+          code: res.code,
+          token: res.token || token.value,
+          name,
+          seat: res.seat || 'a',
+        };
+        saveSession(session.value);
+        // 服务器可能先广播 room:state 再回 ack，此时房间已经渲染好了
+        if (!state.value || state.value.code !== res.code) {
+          state.value = null;
+          view.value = 'room';
+        }
+        toastApi.toast('房间建好了，把码发给朋友～');
+      },
+    );
   }
 
   function joinRoom(code: string, name: string): void {
@@ -877,7 +931,9 @@ function createGameSession() {
     // 服务端已开闸：先解锁输入，内容与判定仍以随后的 room:state 为准
     if (st.phase === 'countdown') {
       openRound.value = round;
-      openDeadline.value = Number(payload && payload.deadline) || Date.now() + SUBMIT_MS;
+      // 不限时房间的 deadline 是 null：只在真是 number 时记录，随后以 room:state 为准
+      const deadline = payload ? payload.deadline : null;
+      if (typeof deadline === 'number' && deadline > 0) openDeadline.value = deadline;
     }
   }
 
@@ -1027,7 +1083,6 @@ function createGameSession() {
     result,
     winBy,
     showReveal,
-    revealFrozen,
     verdictText,
     revealA,
     revealB,
@@ -1041,6 +1096,10 @@ function createGameSession() {
     seatA,
     seatB,
     roomTip,
+    submitLimitMs,
+    submitLimitOptions,
+    submitLimitText,
+    roomSubmitLimitMs,
     // 派生：对局
     opened,
     submittedYou,
@@ -1055,6 +1114,7 @@ function createGameSession() {
     timerWidth,
     timerLow,
     timerText,
+    timerUnlimited,
     roundLabel,
     gameCode,
     basisView,
@@ -1080,6 +1140,7 @@ function createGameSession() {
     // 动作
     init,
     readNickname,
+    setSubmitLimit,
     createRoom,
     joinRoom,
     leaveRoom: () => leaveNow('已离开房间'),

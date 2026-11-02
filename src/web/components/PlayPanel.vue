@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 提交面板（#play-panel）：输入词 / 提交 / 等待提示 / 60s 进度条。
+ * 提交面板（#play-panel）：输入词 / 提交 / 等待提示 / 提交时限进度条。
  * §12：提交按钮的 is-busy 由真实忙态 + 当前相位派生，不靠回调移除。
  */
 import { nextTick, ref, watch } from 'vue';
@@ -71,8 +71,12 @@ watch(
     <p id="opponent-hint" class="hint hint--soft" :class="{ 'is-on': game.opponentHintOn }">
       对方已经提交啦，就差你 👀
     </p>
-    <div id="timer" class="timer" :class="{ 'is-hidden': !game.timerVisible }">
-      <div class="timer__track">
+    <div
+      id="timer"
+      class="timer"
+      :class="{ 'is-hidden': !game.timerVisible, 'timer--unlimited': game.timerUnlimited }"
+    >
+      <div v-if="!game.timerUnlimited" class="timer__track">
         <div
           id="timer-bar"
           class="timer__fill"

@@ -39,6 +39,8 @@ const game = useGameSession();
 
     <p id="room-tip" class="tip">{{ game.roomTip }}</p>
 
+    <p id="room-limit" class="fineprint room-limit">本局填词时限：{{ game.submitLimitText }}</p>
+
     <button
       id="btn-ready"
       class="btn btn--block"

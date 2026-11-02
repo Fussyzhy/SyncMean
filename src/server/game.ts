@@ -15,6 +15,7 @@
 
 import { randomInt, randomUUID } from 'node:crypto';
 
+import { DEFAULT_SUBMIT_MS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
 import type {
   ActionError,
   ActionResult,
@@ -33,14 +34,13 @@ import type {
   Seat,
   ServerToClientEvents,
   SimpleOk,
+  SubmitLimitMs,
   SubmitOk,
   WinBy,
 } from '../shared/protocol.js';
 
 // ==================== 时间参数（PROTOCOL.md §3，集中于此） ====================
 const COUNTDOWN_MS = 3000; // 3-2-1
-const SUBMIT_MS = 60000; // 提交时限
-const REVEAL_MS = 4500; // 揭晓停留，之后自动进入下一轮
 const START_DELAY = 300; // 双方准备后稍等再倒计时
 
 // 全员离线后的房间保留时长与清理扫描周期（PROTOCOL.md §8）
@@ -65,6 +65,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   NOT_IN_ROOM: '你当前不在任何房间中',
   BAD_PHASE: '当前阶段无法进行此操作',
   INVALID_WORD: '词需为 1–12 个字符',
+  INVALID_SUBMIT_LIMIT: '填词时限只能是不限时 / 1 分钟 / 3 分钟 / 5 分钟',
   REPLACED: '你的连接已在别处打开，当前会话被顶替',
   OPPONENT_LEFT: '对手已离开房间',
   ROOM_DELETED: '房间已解散',
@@ -73,11 +74,11 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
 
 export const constants = {
   COUNTDOWN_MS,
-  SUBMIT_MS,
-  REVEAL_MS,
   START_DELAY,
   OFFLINE_ROOM_TTL_MS,
   SWEEP_INTERVAL_MS,
+  DEFAULT_SUBMIT_MS,
+  SUBMIT_LIMIT_OPTIONS,
   CODE_ALPHABET,
   CODE_RE,
   NAME_MAX,
@@ -125,7 +126,8 @@ export interface Room {
   players: Player[];
   submissions: SeatMap<Submission | null>;
   agree: AgreePair;
-  revealFrozen: boolean;
+  /** 房间级填词时限（毫秒）：创建时确定，整局（含 restart / 换轮）不变；0 = 不限时 */
+  submitLimitMs: SubmitLimitMs;
   lastGame: Snapshot | null;
   result: Result | null;
   history: HistoryItem[];
@@ -210,6 +212,22 @@ function sanitizeToken(raw: unknown): string {
 }
 
 /**
+ * 房间级填词时限（PROTOCOL.md §3）：创建时一次性选定，整局不变。
+ * 缺省（undefined / null）沿用 DEFAULT_SUBMIT_MS；其余必须是 SUBMIT_LIMIT_OPTIONS 里的整数，
+ * 否则 INVALID_SUBMIT_LIMIT（字符串 "60000"、90000 等一律拒绝）。
+ */
+type SubmitLimitValidation = { ok: true; value: SubmitLimitMs } | ActionError;
+
+function validateSubmitLimit(raw: unknown): SubmitLimitValidation {
+  if (raw === undefined || raw === null) return { ok: true, value: DEFAULT_SUBMIT_MS };
+  if (typeof raw !== 'number' || !Number.isInteger(raw)) return fail('INVALID_SUBMIT_LIMIT');
+  if (!(SUBMIT_LIMIT_OPTIONS as readonly number[]).includes(raw)) {
+    return fail('INVALID_SUBMIT_LIMIT');
+  }
+  return { ok: true, value: raw as SubmitLimitMs };
+}
+
+/**
  * PROTOCOL.md §6 的判定归一化：
  * NFKC、小写、去掉空白 / 标点 / 符号。
  */
@@ -281,6 +299,8 @@ export class Game {
   ): ActionResult<CreateOk> {
     const nameRes = validateName(payload.name);
     if (!nameRes.ok) return nameRes;
+    const limitRes = validateSubmitLimit(payload.submitLimitMs);
+    if (!limitRes.ok) return limitRes;
 
     const code = this._generateCode();
     const token = sanitizeToken(payload.token) || randomUUID();
@@ -303,7 +323,7 @@ export class Game {
       players: [player],
       submissions: { a: null, b: null },
       agree: { a: false, b: false }, // v2：本轮同意词投票（PROTOCOL.md §4）
-      revealFrozen: false, // v2：本轮自动推进是否已被投票取消
+      submitLimitMs: limitRes.value, // 房间级填词时限，创建时选定、整局不变
       result: null,
       history: [],
       lastGame: null, // v2.1：整局结束后的冻结快照，供未退出者继续 won 视角
@@ -482,7 +502,8 @@ export class Game {
 
   /**
    * v2：本轮同意词投票（PROTOCOL.md §5.1）。
-   * 仅 reveal 阶段有效；首次任一座位投 true 立刻冻结自动推进；两票齐则通关（winBy='agree'）。
+   * 仅 reveal 阶段有效；只记录票面，两票齐则通关（winBy='agree'）。
+   * 投票不改变 reveal 的推进方式：reveal 永不自动推进，只能由 round:next 进入下一轮。
    * 返回 { ok, agree:{a,b}, winBy:'agree'|null }。
    */
   setAgree(socketId: string | null, agree?: boolean): ActionResult<AgreeOk> {
@@ -498,13 +519,6 @@ export class Game {
     // result 同步反映本轮票面（两票齐之前 isWin / winBy 不变）
     if (room.result) room.result.agree = { a: Boolean(votes.a), b: Boolean(votes.b) };
 
-    // 首张 true 票：取消本轮自动推进，且此后（含撤票）不再恢复
-    if (value && !room.revealFrozen) {
-      this._clearTimer(room);
-      room.revealFrozen = true;
-      room.deadline = null;
-    }
-
     const ballot: AgreePair = { a: Boolean(votes.a), b: Boolean(votes.b) };
 
     if (!(votes.a && votes.b)) {
@@ -515,7 +529,6 @@ export class Game {
     // 两票齐 -> 通关（由后到的那一票触发）
     this._clearTimer(room);
     room.deadline = null;
-    room.revealFrozen = true;
     room.phase = 'won';
     if (room.result) {
       room.result.isWin = true;
@@ -574,7 +587,6 @@ export class Game {
       room.basis = null;
       room.submissions = { a: null, b: null };
       room.agree = { a: false, b: false };
-      room.revealFrozen = false;
       room.result = null;
       room.history = [];
       room.deadline = null;
@@ -658,7 +670,7 @@ export class Game {
     const settleView = Boolean(room.lastGame) && !player.settleDismissed ? room.lastGame : null;
     const inReveal = !settleView && room.phase === 'reveal';
     const votes = this._agreeOf(room);
-    // PROTOCOL.md §5.3：reveal 阶段之外 agree / revealFrozen 恒为 false
+    // PROTOCOL.md §5.3：reveal 阶段之外 agree 恒为 false
     const agreeView = {
       you: inReveal ? Boolean(votes[player.seat]) : false,
       opponent: opponent && inReveal ? Boolean(votes[opponent.seat]) : false,
@@ -681,7 +693,8 @@ export class Game {
       // 同时要求 settlePending===true，否则新房会因为 settleDismissed 初值为 false 而永久锁死。
       settlePending: Boolean(room.lastGame),
       agree: settleView ? { you: false, opponent: false } : agreeView,
-      revealFrozen: settleView ? false : inReveal ? Boolean(room.revealFrozen) : false,
+      // 房间级填词时限：对所有人（含结算快照视角）都下发同一个房间值
+      submitLimitMs: room.submitLimitMs,
       deadline: settleView ? null : room.deadline == null ? null : room.deadline,
       result: settleView ? this._publicResult(settleView.result) : this._publicResult(room.result),
       history: this._publicHistory(settleView ? settleView.history : room.history),
@@ -716,7 +729,6 @@ export class Game {
     room.phase = 'countdown';
     room.submissions = { a: null, b: null };
     room.agree = { a: false, b: false };
-    room.revealFrozen = false;
     // v2.1 兜底：新一局已经开始，结算快照与「谁退过结算页」全部作废
     this._clearSettle(room);
     room.result = null;
@@ -735,7 +747,8 @@ export class Game {
   _openRound(room: Room): void {
     if (room.phase !== 'countdown') return;
     room.phase = 'submitting';
-    room.deadline = Date.now() + SUBMIT_MS;
+    // 不限时（submitLimitMs === 0）：deadline=null 且不设超时计时器，双方都提交才揭晓
+    room.deadline = room.submitLimitMs > 0 ? Date.now() + room.submitLimitMs : null;
     room.lastActivityAt = Date.now();
 
     this._emitRoom(room, 'round:open', {
@@ -744,7 +757,9 @@ export class Game {
       deadline: room.deadline,
     });
     this.broadcastState(room);
-    this._setTimer(room, () => this._onSubmitTimeout(room), SUBMIT_MS);
+    if (room.submitLimitMs > 0) {
+      this._setTimer(room, () => this._onSubmitTimeout(room), room.submitLimitMs);
+    }
   }
 
   _onSubmitTimeout(room: Room): void {
@@ -772,9 +787,8 @@ export class Game {
     const a = room.submissions.a || { word: TIMEOUT_WORD, timedOut: true };
     const b = room.submissions.b || { word: TIMEOUT_WORD, timedOut: true };
     room.submissions = { a, b };
-    // 新一轮揭晓起点：票面清零、自动推进未冻结（PROTOCOL.md §5.2）
+    // 新一轮揭晓起点：票面清零（PROTOCOL.md §5.2）
     room.agree = { a: false, b: false };
-    room.revealFrozen = false;
 
     const words = { a: a.word, b: b.word };
     const normA = normalize(words.a);
@@ -813,10 +827,10 @@ export class Game {
       return;
     }
 
+    // v3：非通关的 reveal 永不自动推进（没有 REVEAL_MS），只能由 round:next 进入下一轮
     room.phase = 'reveal';
-    room.deadline = Date.now() + REVEAL_MS;
+    room.deadline = null;
     this.broadcastState(room);
-    this._setTimer(room, () => this._advanceRound(room), REVEAL_MS);
   }
 
   /** 进入下一轮：basis = 上一轮的 words，round + 1，回到倒计时 */
@@ -830,7 +844,6 @@ export class Game {
     room.result = null;
     room.submissions = { a: null, b: null };
     room.agree = { a: false, b: false };
-    room.revealFrozen = false;
     room.phase = 'countdown';
     room.deadline = Date.now() + COUNTDOWN_MS;
     room.lastActivityAt = Date.now();

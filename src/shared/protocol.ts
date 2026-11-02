@@ -13,6 +13,20 @@ export type Phase = 'lobby' | 'countdown' | 'submitting' | 'reveal' | 'won' | 'a
 
 export type WinBy = 'same' | 'agree';
 
+/* ==================== 房间级时间参数（创建房间时由房主设定） ==================== */
+
+/**
+ * 填词时限可选项（毫秒）。`0` 表示不限时：round:open 的 deadline 为 null，
+ * 服务端不设超时计时器，必须双方都提交才会揭晓。
+ * 创建时一次性选定，整局（含 game:restart 重开）保持不变。
+ */
+export const SUBMIT_LIMIT_OPTIONS = [0, 60000, 180000, 300000] as const;
+
+export type SubmitLimitMs = (typeof SUBMIT_LIMIT_OPTIONS)[number];
+
+/** 请求里未指定 submitLimitMs 时（含旧客户端）使用 1 分钟，与历史行为一致 */
+export const DEFAULT_SUBMIT_MS: SubmitLimitMs = 60000;
+
 export type ErrorCode =
   | 'INVALID_NAME'
   | 'INVALID_CODE'
@@ -22,6 +36,7 @@ export type ErrorCode =
   | 'NOT_IN_ROOM'
   | 'BAD_PHASE'
   | 'INVALID_WORD'
+  | 'INVALID_SUBMIT_LIMIT'
   | 'REPLACED'
   | 'OPPONENT_LEFT'
   | 'ROOM_DELETED'
@@ -93,7 +108,9 @@ export interface PublicRoomState {
   submitted: { you: boolean; opponent: boolean };
   settlePending: boolean;
   agree: { you: boolean; opponent: boolean };
-  revealFrozen: boolean;
+  /** 本房间填词时限（毫秒），创建时由房主设定；0 = 不限时 */
+  submitLimitMs: number;
+  /** countdown = 倒计时结束时刻；submitting = 提交截止（不限时为 null）；reveal = null（不再自动推进） */
   deadline: number | null;
   result: Result | null;
   history: HistoryItem[];
@@ -150,6 +167,8 @@ export interface RestartOk {
 export interface CreatePayload {
   name: string;
   token?: string;
+  /** 填词时限；缺省用 DEFAULT_SUBMIT_MS，非法值返回 INVALID_SUBMIT_LIMIT */
+  submitLimitMs?: SubmitLimitMs;
 }
 
 export interface JoinPayload {
@@ -184,7 +203,8 @@ export interface CountdownPayload {
 export interface RoundOpenPayload {
   round: number;
   basis: Basis | null;
-  deadline: number;
+  /** 提交截止时刻；本房间为「不限时」时为 null */
+  deadline: number | null;
 }
 
 export interface RevealPayload {

@@ -2,6 +2,11 @@
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
 >
+> **v3.2 变更（相对 v3.1）**：
+> 1. **填词时限改为建房时由房主设定**：可选「不限时 / 1 分钟 / 3 分钟 / 5 分钟」，整局（含 `game:restart` 重开）固定，加入者不可改。`room:create` 新增可选 `submitLimitMs`；`PublicRoomState` 新增 `submitLimitMs`；`round:open.deadline` 在「不限时」时为 `null`；新增错误码 `INVALID_SUBMIT_LIMIT`。
+> 2. **删除揭晓自动推进（原 `REVEAL_MS = 4500`）**：`round:reveal` 之后停在 reveal **无限等待**，只能由玩家发 `round:next` 进入下一轮；reveal 阶段 `deadline` 恒为 `null`，服务端不设该阶段计时器。
+> 3. 相应删除 `PublicRoomState.revealFrozen`（自动推进已不存在，冻结状态失去意义）与 `round:agree` 的「首票取消计时器 / 冻结」规则。
+>
 > **v3.1 变更（相对 v3）**：新增**明暗主题**（默认跟随系统、兜底明亮、显式选择持久化）。
 > 协议事件与字段零变化；新增 `#btn-theme` DOM id 与 §13 主题契约，`<html>` 上增加 `data-theme` / `data-theme-source` 两个属性。
 >
@@ -23,6 +28,8 @@
 - 双人联机：A、B 各自想一个词，双方**都提交后**才同时揭晓（服务器绝不提前泄露）。
 - 两个词**归一化后相同** → 通关（`winBy: 'same'`）。
 - 两个词不同 → 以【本轮两个词】为联想依据进入下一轮。
+- **v3.2**：填词时限由房主创建房间时选定（不限时 / 1 分钟 / 3 分钟 / 5 分钟），整局固定。
+- **v3.2**：揭晓后**不自动推进**，双方看完后点「进入下一轮」继续（不再有 4.5 秒自动跳转）。
 - **v2**：揭晓后若双方都确认「这两个词算同意词」→ 同样通关（`winBy: 'agree'`）。判定权在玩家，服务器不做任何语义判断。
 - 整局通关后进入**结算视图**，展示最终成功的词与逐轮词语，支持导出一张整局词语列表图片。
 - 房间 4 位码，昵称进入，无需注册/登录。只有「普通模式」。本地运行，单端口。
@@ -73,16 +80,21 @@ docker-compose.yml     单实例编排（房间在内存，禁止扩副本）
 - 未匹配的路由回落到 `index.html`（保证 `/?room=ABCD` 可用）。
 - 服务端日志前缀统一为 `[同声传意]`。
 
-## 3. 时间参数（集中在 `src/server/game.ts` 顶部常量）
+## 3. 时间参数（v3.2）
 
 ```js
-const COUNTDOWN_MS = 3000;  // 3-2-1
-const SUBMIT_MS    = 60000; // 提交时限
-const REVEAL_MS    = 4500;  // 揭晓停留，之后自动进入下一轮
-const START_DELAY  = 300;   // 双方准备后稍等再倒计时
+const COUNTDOWN_MS       = 3000;  // 3-2-1
+const DEFAULT_SUBMIT_MS  = 60000; // 建房未指定 submitLimitMs 时的默认填词时限（1 分钟）
+const SUBMIT_LIMIT_OPTIONS = [0, 60000, 180000, 300000]; // 0=不限时，其余=1/3/5 分钟
+const START_DELAY        = 300;   // 双方准备后稍等再倒计时
 ```
 
-**v2 规则**：本轮一旦有人投出「同意词」票，该轮的 4.5s 自动推进计时器**立即取消且不再恢复**（`deadline = null`），此后只能由玩家手动点 `round:next` 进入下一轮。撤票也不恢复计时——这条规则必须简单、可预测。
+**v3.2 规则**：
+- **填词时限是房间级参数**：创建房间时由房主在 `room:create` 里通过 `submitLimitMs` 指定（必须在 `SUBMIT_LIMIT_OPTIONS` 内，缺省 `DEFAULT_SUBMIT_MS`），非法值返回 `INVALID_SUBMIT_LIMIT`。整局（多轮之间、`game:restart` 重开后）保持不变，加入者不能修改。
+- **没有「揭晓停留」计时器**：非通关时服务端进入 `reveal` 后 `deadline = null`，且不设任何 timer，无限等待，直到任一玩家发 `round:next` 才进入下一轮（3s 倒计时）。
+- **「不限时」（`submitLimitMs = 0`）**：`round:open` 的 `deadline = null`，服务端不设提交超时计时器，只有双方都 `round:submit` 才揭晓。因此一方始终不提交时，本轮会一直停在 `submitting`——这是该模式的预期行为，不做兜底。
+- **计时的房间**：`round:open` 时 `deadline = 服务端 now + submitLimitMs`；到点后仍未提交的座位自动填 `{word:'词穷', timedOut:true}`，随后照常揭晓。
+- 旧版 `SUBMIT_MS` / `REVEAL_MS` 常量**删除**，不再有 60s 固定时限与 4.5s 揭晓停留。
 
 ## 4. 服务端数据模型（内部，不下发）
 
@@ -94,8 +106,8 @@ Room {
   basis: {a,b}|null,       // 本轮联想依据；第 1 轮为 null
   players: [Player],       // 最多 2 个，按加入顺序 seats = ['a','b']
   submissions: {a:Sub|null, b:Sub|null},  // Sub = {word, timedOut}
+  submitLimitMs: number,           // v3.2：房间级填词时限，0 = 不限时；创建后整局不变
   agree: {a:boolean, b:boolean},   // v2：本轮同意词投票，进入新一轮/倒计时时全部清零
-  revealFrozen: boolean,           // v2：本轮是否已因投票取消自动推进
   lastGame: Snapshot|null,         // v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角
   result: Result|null,
   history: [HistoryItem],
@@ -113,7 +125,7 @@ HistoryItem { round, basis:{a,b}|null, words:{a,b}, isWin, agree:{a,b}, winBy:'s
 所有「客户端 → 服务端」的请求都通过 ack 回调返回结果：
 
 ```js
-socket.emit('room:create', { name, token? }, (res) => { ... })
+socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 // 成功: { ok: true, ...字段 }
 // 失败: { ok: false, error: 'ERROR_CODE', message: '中文提示' }
 ```
@@ -122,14 +134,14 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 
 | 事件 | 请求体 | ack 成功返回 | 说明 |
 |---|---|---|---|
-| `room:create` | `{name, token?}` | `{ok, code, token, seat:'a'}` | 建房，创建者即 seat a / host |
+| `room:create` | `{name, token?, submitLimitMs?}` | `{ok, code, token, seat:'a'}` | 建房，创建者即 seat a / host。`submitLimitMs` 必须在 `SUBMIT_LIMIT_OPTIONS` 内，缺省 `DEFAULT_SUBMIT_MS`；非法值 → `INVALID_SUBMIT_LIMIT` |
 | `room:join` | `{code, name, token?}` | `{ok, code, token, seat, state}` | 加入或**断线重连**：若 token 命中房间内已有玩家 → 恢复该玩家（任意 phase 都允许） |
 | `room:leave` | `{}` | `{ok:true}` | 主动离开 |
 | `player:ready` | `{ready:boolean}` | `{ok:true}` | 仅 lobby 阶段有效 |
 | `round:submit` | `{word:string}` | `{ok:true, submitted:true}` | 仅 submitting 阶段；**不得**在返回或广播里泄露对方已提交的内容 |
 | `round:agree` | `{agree:boolean}` | `{ok:true, agree:{a,b}, winBy:'agree'\|null}` | **v2**。仅 reveal 阶段有效。为本人投/撤「这两个词算同意词」。`agree` 缺省视为 `true`。两票齐 → 立即通关（`winBy:'agree'`）。幂等：重复投同一方向不报错 |
-| `round:next` | `{}` | `{ok:true}` | reveal 阶段：跳到下一轮（含投票冻结后手动继续） |
-| `game:restart` | `{}` | `{ok:true, watching:boolean}` | won 阶段：**本人**退出结算页回到 lobby（round=1, basis=null, history=[], ready 全 false, result=null, agree 全 false, revealFrozen=false）。若对方还留在结算页，服务端把整局冻结成 `lastGame` 快照继续为 TA 呈现 won 视角（见 §5.3.1）。对方也已退出时 `lastGame` 才置 null。 |
+| `round:next` | `{}` | `{ok:true}` | reveal 阶段：进入下一轮。v3.2 起**这是离开 reveal 的唯一方式**（不再自动推进） |
+| `game:restart` | `{}` | `{ok:true, watching:boolean}` | won 阶段：**本人**退出结算页回到 lobby（round=1, basis=null, history=[], ready 全 false, result=null, agree 全 false；`submitLimitMs` 保持不变）。若对方还留在结算页，服务端把整局冻结成 `lastGame` 快照继续为 TA 呈现 won 视角（见 §5.3.1）。对方也已退出时 `lastGame` 才置 null。 |
 
 `room:join` 规则优先级：
 1. `token` 命中房间内已有玩家 → 重连（新 socketId 顶替旧的，旧连接收到 `room:error {code:'REPLACED'}` 并被移出房间频道）。
@@ -138,17 +150,17 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 4. phase !== 'lobby' → `ROOM_IN_PROGRESS`。
 5. 否则以 `seat:'b'` 加入。
 
-`round:agree` 细则：
+`round:agree` 细则（v3.2 起投票不再影响自动推进，reveal 本来就不会自动推进）：
 - 仅 `phase === 'reveal'` 允许，否则 `BAD_PHASE`；不在房间 `NOT_IN_ROOM`。
 - 只接受 `true|false`（`Boolean` 归一），无长度/内容入参。
-- 首次出现任一 `true` 票时：`_clearTimer` + `revealFrozen = true` + `deadline = null` + 广播 state。
+- 投票只记录票面并广播 state（`reveal.deadline` 恒为 `null`，无需清理任何计时器）。
 - 两票都为 `true` 时（顺序无所谓，后到的一票触发）：
   - `result.isWin = true`、`result.winBy = 'agree'`、`result.agree = {a:true,b:true}`；
   - **同步更新本轮 history 末项**的 `isWin=true / winBy='agree' / agree={a:true,b:true}`（结算与导出图依赖 history）；
-  - `phase = 'won'`、`deadline = null`、计时器清空；
+  - `phase = 'won'`、`deadline = null`；
   - 广播 `room:notice {kind:'system', text:'双方都确认是同意词，通关！'}`，随后按接收者视角 `room:state`。
   - **不再重发 `round:reveal`**（前端以 state 为准渲染 won）。
-- 撤票（`agree:false`）：仅在自己已是 `true` 时把本座位清零，不恢复自动推进。
+- 撤票（`agree:false`）：仅在自己已是 `true` 时把本座位清零。
 - 双方都是 `true` 之后不允许再撤（已 `won`，返回 `BAD_PHASE`）。
 - 超时自动填的「词穷」同样可以投同意词票（判定权在玩家）。
 
@@ -158,9 +170,9 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 |---|---|---|
 | `room:state` | `PublicRoomState`（见 §5.3，**按接收者视角生成**） | 任何状态变化后、加入后、重连后 |
 | `round:countdown` | `{round, basis, seconds:3}` | 进入 countdown 阶段 |
-| `round:open` | `{round, basis, deadline}` | 倒计时结束、输入开放；`deadline = 服务端 now + SUBMIT_MS` |
+| `round:open` | `{round, basis, deadline}` | 倒计时结束、输入开放；`deadline = 服务端 now + submitLimitMs`（本房间不限时则为 `null`，无超时计时器） |
 | `round:opponent-submitted` | `{}` | 对方已提交（仅提示，不含文字） |
-| `round:reveal` | `{round, basis, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy, history}` | 双方都提交（或超时自动提交）后，**同时**揭晓。此刻 `agree` 必为 `{a:false,b:false}`、`winBy` 为 `'same'` 或 `null` |
+| `round:reveal` | `{round, basis, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy, history}` | 双方都提交（或计时房间到点自动提交）后，**同时**揭晓。此刻 `agree` 必为 `{a:false,b:false}`、`winBy` 为 `'same'` 或 `null`。v3.2 起揭晓后不自动推进 |
 | `room:notice` | `{text:string, kind:'join'\|'leave'\|'info'\|'system'}` | 有人进出、同意词通关等提示，前端做 toast |
 | `room:error` | `{code, message}` | 会话级错误（`OPPONENT_LEFT`、`REPLACED`、`ROOM_DELETED`） |
 
@@ -180,7 +192,7 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
   submitted: { you: false, opponent: false },   // 只给布尔，永不给词
   settlePending: false,                        // v2.1：Boolean(room.lastGame)，即「有一局结算还挂着没人收」
   agree:     { you: false, opponent: false },   // v2，只给布尔；reveal 阶段之外恒为 false
-  revealFrozen: false,                          // v2，本轮自动推进是否已被投票取消
+  submitLimitMs: 60000,                         // v3.2：房间级填词时限（毫秒），0 = 不限时
   deadline: 1761882000000 | null,               // 服务端毫秒时间戳；null 表示无倒计时
   result: {
     round, words:{a,b}, isWin, timedOut:{a,b},
@@ -191,7 +203,7 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 }
 ```
 
-`deadline` 语义：countdown = 倒计时结束时刻；submitting = 提交截止；reveal = 下一轮开始时刻；`revealFrozen` 为真时 reveal 的 `deadline` 为 `null`。won / lobby / aborted 恒为 `null`。
+`deadline` 语义：countdown = 倒计时结束时刻；submitting = 提交截止（**不限时房间为 `null`**）；reveal = **恒为 `null`**（v3.2 起揭晓后不自动推进）；won / lobby / aborted 恒为 `null`。
 
 `agree` 视角说明：`agree.you` 是本人本轮投票，`agree.opponent` 是对方是否已投票。**绝不**因为对方投了票就泄露任何文字内容（此阶段词本来就已公开，无额外风险）。
 
@@ -208,9 +220,9 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 - Room 新增 `lastGame: Snapshot | null`，`Snapshot = { round, basis, history, result, endedAt }`（`history`/`result` 形状与 §5.3 完全一致，前端结算/导出可直接复用）。
 - Player 新增 `settleDismissed: boolean`（本玩家是否已退出结算页）。存在玩家对象上，所以**断线重连后仍保持**在结算页。
 - `game:restart` 语义变为「我退出结算页」：
-  1. 首次有人退出（内部 `phase==='won'`）：先把整局冻结进 `lastGame`，再把房间内部重置为 `lobby`（`round=1`、`basis=null`、`submissions/agree/revealFrozen/result/history` 清空、`deadline=null`、所有 `ready=false`——与旧行为相同），并置**点击者** `settleDismissed=true`、其余人 `false`。
+  1. 首次有人退出（内部 `phase==='won'`）：先把整局冻结进 `lastGame`，再把房间内部重置为 `lobby`（`round=1`、`basis=null`、`submissions/agree/result/history` 清空、`deadline=null`、所有 `ready=false`——与旧行为相同），并置**点击者** `settleDismissed=true`、其余人 `false`。
   2. 后续有人退出（内部已是 `lobby`）：只把自己 `settleDismissed=true`；当**房间内所有玩家**都已退出 → `lastGame=null`。
-- **视角门控（关键）**：`getState(room, player)` 里，若 `room.lastGame && !player.settleDismissed`，则该玩家看到的 state 为「won 视角」：`phase:'won'`、`round/basis/history/result` 全部取自 `lastGame`、`deadline:null`、`submitted` 与 `agree` 全 false、`revealFrozen:false`。已退出的人看到真实房间状态。因此前端**仍然只按 `state.phase` 决定渲染哪一屏**，不需要新增分支。
+- **视角门控（关键）**：`getState(room, player)` 里，若 `room.lastGame && !player.settleDismissed`，则该玩家看到的 state 为「won 视角」：`phase:'won'`、`round/basis/history/result` 全部取自 `lastGame`、`deadline:null`、`submitted` 与 `agree` 全 false（`submitLimitMs` 仍下发房间真实值）。已退出的人看到真实房间状态。因此前端**仍然只按 `state.phase` 决定渲染哪一屏**，不需要新增分支。
 - 因为看到 `phase:'won'`，未退出的人自然点不到「准备」；服务端还必须**硬拒**：`player:ready` 对「`lastGame` 存在且本人 `settleDismissed===false`」的玩家返回 `BAD_PHASE`（防止陈旧或被改过的前端绕过）。
 - 对局不可能在有人还在看结算时开始：`_scheduleStart` 需要两人都 ready，而未退出者无法 ready；另外 `_startCountdown` 强制 `lastGame=null` 且所有人 `settleDismissed=false`（兜底）。
 - `room:notice` 改为**定向**发（不再 `_emitRoom` 广播）：退出者收 `{kind:'info', text:'已回到房间，可以再来一局'}`；仍在看结算的人收 `{kind:'system', text:'对方已经回到房间等你，看完点「再来一局」'}`。
@@ -229,7 +241,7 @@ socket.emit('room:create', { name, token? }, (res) => { ... })
 
 ### 5.4 错误码
 
-`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
+`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `INVALID_SUBMIT_LIMIT`(填词时限不在 `SUBMIT_LIMIT_OPTIONS` 内) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
 
 `message` 一律中文，可直接展示给玩家。同意词相关的所有拒绝都用 `BAD_PHASE`，不新增错误码。
 
@@ -252,22 +264,20 @@ isWin = normalize(a) !== '' && normalize(a) === normalize(b);
 ## 7. 对局流程状态机
 
 ```
-lobby --(两人 ready, 延迟 300ms)--> countdown(3s) --> submitting(≤60s)
-submitting --(两人都提交 / 60s 超时自动填「词穷」)--> [判定]
+lobby --(两人 ready, 延迟 300ms)--> countdown(3s) --> submitting(≤submitLimitMs；不限时则无上限)
+submitting --(两人都提交 / 计时房间到点自动填「词穷」)--> [判定]
    ├─ 归一化相同 --> won（winBy='same'，发 round:reveal, phase=won, 无计时器）
-   └─ 不同     --> reveal(4.5s)
-reveal --(任一玩家 round:agree=true)--> reveal（冻结：清计时器, deadline=null, revealFrozen=true）
-reveal --(双方都 round:agree=true)----> won（winBy='agree'，更新 history 末项，room:notice）
-reveal --(round:next)--> countdown(下一轮) 立即
-reveal --(4.5s 无人投票)--> countdown(下一轮)
-won --(game:restart)--> lobby（清空 history/result/ready/agree/revealFrozen；整局冻结进 lastGame 供未退出者继续看）
+   └─ 不同     --> reveal（v3.2：deadline=null、无计时器，无限等待）
+reveal --(round:next，任一玩家)--> countdown(下一轮) 立即
+reveal --(双方都 round:agree=true)--> won（winBy='agree'，更新 history 末项，room:notice）
+won --(game:restart)--> lobby（清空 history/result/ready/agree；submitLimitMs 保留；整局冻结进 lastGame 供未退出者继续看）
 won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但留守者仍看到 won 视角（§5.3.1）
 ```
 
-- 进入下一轮时：`round += 1`，`basis = 本轮 words`，清空 submissions，`agree = {a:false,b:false}`，`revealFrozen = false`，`phase='countdown'`。
-- `_startCountdown` 与 `_advanceRound` 都必须清零 `agree` 与 `revealFrozen`（同一局多轮之间投票不串轮）。
+- 进入下一轮时：`round += 1`，`basis = 本轮 words`，清空 submissions，`agree = {a:false,b:false}`，`phase='countdown'`。
+- `_startCountdown` 与 `_advanceRound` 都必须清零 `agree`（同一局多轮之间投票不串轮）。
 - 每次相位变化都要 `room:state` 广播；除 `round:countdown` / `round:open` 外不要用其他事件改相位。
-- 每个房间同一时刻只有一个 `timer`，切换相位前必须 `clearTimeout`。
+- 每个房间同一时刻只有一个 `timer`，切换相位前必须 `clearTimeout`；**reveal 阶段不设 timer**。
 
 ## 8. 断线 / 离开
 
@@ -275,7 +285,7 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 - 主动 `room:leave` 或双断线清理：若剩余 0 人 → 删除房间；剩余 1 人在进行中 → 该玩家收到 `room:error {code:'OPPONENT_LEFT'}`, `state.phase='aborted'`。
 - host 离开 → 剩余玩家 `isHost=true`。
 - 空房间 / 全员离线超 10 分钟：清理（周期扫描）。
-- reveal 冻结期间对方离开：同样走 `aborted`。
+- reveal 等待期间对方离开：同样走 `aborted`。
 
 ## 9. 必须存在的 DOM id（自动化验收用，前端不得改名）
 
@@ -285,6 +295,14 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 #room-code  #btn-copy  #btn-ready  #btn-leave-room
 #basis  #word-input  #btn-submit  #waiting-hint
 #reveal-a  #reveal-b  #reveal-verdict  #toast  #history
+#timer  #timer-text
+```
+
+**v3.2 新增（填词时限）**：
+
+```
+#submit-limit-group   首页创建房间的时限选择组（role=radiogroup；四个选项按钮带 data-limit-ms="0|60000|180000|300000"，选中态 class is-active / aria-checked=true）
+#room-limit           房间页展示「本局填词时限：…」（加入者也能看到房主的设定）
 ```
 
 **v2 新增（同意词投票）**，位于对局视图的揭晓面板内：
@@ -323,18 +341,19 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 
 ## 10. 验收标准
 
-1. `yarn test` 通过：`tools/sim.ts` 自起服务，两个 socket 客户端完成 创建→加入→双方 ready→收到 countdown→open→各自 submit→reveal 判定「不同」→下一轮→第二轮提交相同→won→restart→回 lobby；断言所有关键事件与字段，并断言「在对方提交前拿不到对方词」。
-2. `yarn test` 额外覆盖 v2 同意词链路：某轮判定「不同」→ A 投 `round:agree` → 断言 state 出现 `agree.you=true / agree.opponent=false / revealFrozen=true / deadline=null` 且**不再自动推进**（等待 > `REVEAL_MS` 仍停在 reveal）→ B 投 `round:agree` → 断言 `phase='won'`、`result.winBy='agree'`、`result.isWin=true`、`history` 末项 `isWin=true/winBy='agree'`、收到 `room:notice`。
-3. `yarn test` 还需断言：撤票可把 `agree.you` 变回 `false` 且 `revealFrozen` 保持 `true`；`won` 阶段投 `round:agree` 返回 `BAD_PHASE`；进入新一轮后上一轮投票清零；`agree` 在非 reveal 阶段的 state 中恒为 `{you:false, opponent:false}`。
+1. `yarn test` 通过：`tools/sim.ts` 自起服务，两个 socket 客户端完成 创建→加入→双方 ready→收到 countdown→open→各自 submit→reveal 判定「不同」→`round:next` 进入下一轮→第二轮提交相同→won→restart→回 lobby；断言所有关键事件与字段，并断言「在对方提交前拿不到对方词」。
+2. `yarn test` 额外覆盖 v2 同意词链路（v3.2 语义）：某轮判定「不同」→ A 投 `round:agree` → 断言 state 出现 `agree.you=true / agree.opponent=false / deadline=null`，且**永不自动推进**（等待一段时间仍停在 reveal、无 `round:countdown`/`round:open`）→ B 投 `round:agree` → 断言 `phase='won'`、`result.winBy='agree'`、`result.isWin=true`、`history` 末项 `isWin=true/winBy='agree'`、收到 `room:notice`。
+3. `yarn test` 还需断言：撤票可把 `agree.you` 变回 `false`；`won` 阶段投 `round:agree` 返回 `BAD_PHASE`；进入新一轮后上一轮投票清零；`agree` 在非 reveal 阶段的 state 中恒为 `{you:false, opponent:false}`。
 4. `yarn build && yarn start` 后 `GET /health` 返回 200，响应体形状不变。
 5. 页面无 console 报错，`/?room=ABCD` 能预填房间码。
-6. 手机 375px 宽无横向滚动、按钮可点。
+6. 手机 375px 宽无横向滚动、按钮可点；首页 `#submit-limit-group` 的 4 个时限选项在 375px 下不得溢出。
 7. **回归（bug 4）**：完整跑一局至通关 → 点「再来一局」回到房间页 → `#btn-ready` 必须**没有** `is-busy` 类、`aria-busy` 已移除、`textContent` 为「准备」。任意一次 `#btn-ready` 点击之后（无论成功、失败、切页、断线重连）都不得残留 `is-busy`。
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
-11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint 两个旧版缺失的 DOM id 现在必须存在。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit 这些 DOM id 必须存在。
 12. **明暗模式（v3.1）**：无存储时跟随系统 `prefers-color-scheme`；系统能力不可用（无 `matchMedia`）时**兜底明亮**；`#btn-theme` 单击切换并把 `321:theme` 写入 localStorage，刷新后保持；Shift+单击清除存储回到「跟随系统」；深浅两套主题的 `body` 背景色不同、正文与按钮文字对比度 ≥ 4.5:1；`<html data-theme>`、`data-theme-source` 与 `<meta name="theme-color">` 同步更新。
+13. **填词时限（v3.2）**：`yarn test` 断言——默认创建（不传 `submitLimitMs`）时 `state.submitLimitMs===60000` 且 `round:open.deadline ≈ now+60000`；创建传 `180000` 时 `state.submitLimitMs===180000`、`round:open.deadline-now ∈ [170000,182000]`；非法值（如 `90000`、字符串）返回 `INVALID_SUBMIT_LIMIT`；传 `0` 时 `round:open.deadline===null`、等待一段时间仍停在 `submitting` 且不自动揭晓、双方提交后正常 `round:reveal`；`game:restart` 后新 lobby 的 `state.submitLimitMs` 与建房时一致。浏览器验收需覆盖：首页可选四种时限、房间页 `#room-limit` 显示正确、不限时房间 `#timer` 显示「不限时」且无进度条、揭晓后无自动跳转（停留超过原 4.5s 仍在 reveal，`#btn-next` 可手动进入下一轮）。
 
 ## 11. 导出图片契约（纯前端）
 

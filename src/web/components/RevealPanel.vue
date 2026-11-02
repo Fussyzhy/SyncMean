@@ -75,7 +75,7 @@ const game = useGameSession();
       :disabled="game.nextBusy"
       @click="game.nextRound"
     >
-      跳过等待，直接下一轮
+      进入下一轮
     </button>
   </section>
 </template>

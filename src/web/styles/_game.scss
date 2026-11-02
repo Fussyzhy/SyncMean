@@ -161,4 +161,9 @@
     color: var(--muted);
     font-variant-numeric: tabular-nums;
   }
+
+  // 不限时：没有进度条，只保留右侧的「不限时」文案
+  &--unlimited {
+    justify-content: flex-end;
+  }
 }

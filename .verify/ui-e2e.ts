@@ -6,6 +6,7 @@
  *
  * 迁移说明：本文件由 .verify/ui-e2e.js（只读蓝本）1:1 迁移为 TypeScript，
  * 保留全部 63 条对局 check（+ --smoke 1 条），未放宽任何断言；DOM id 与 PROTOCOL.md §9 一致。
+ * v3.2 追加：建房填词时限（默认 / 不限时）、不限时房间计时区、揭晓不自动推进、375px 时限选择组。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -21,8 +22,8 @@ const APP_URL = process.env.APP_URL || 'http://127.0.0.1:3210';
 const CDP_PORT = Number(process.env.CDP_PORT || 9333);
 const OUT = path.join(HERE, 'shots');
 const SMOKE = process.argv.includes('--smoke');
-// PROTOCOL.md §3：揭晓停留 4.5s 后自动进下一轮，用于验证「投票后冻结」
-const REVEAL_MS = 4500;
+// v3.2（PROTOCOL §3/§7）：揭晓后不自动推进，用于验证「等待一段时间仍停在 reveal」
+const NO_AUTO_ADVANCE_WAIT_MS = 2000;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (...a: unknown[]): void => console.log(...a);
@@ -637,12 +638,40 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   check(/同声传意/.test(homeText), '首页标题为「同声传意」（改名验收）');
   check(!/联想词/.test(homeText), '首页不再出现旧名「联想词」');
 
+  // v3.2：建房时可选填词时限（不限时 / 1 / 3 / 5 分钟），默认 1 分钟
+  const limitGroup = asRecord(
+    await a.eval(`(() => {
+      const g = document.querySelector('#submit-limit-group');
+      if (!g) return null;
+      const opts = Array.from(g.querySelectorAll('[data-limit-ms]'));
+      const active = opts.filter(
+        (o) => o.classList.contains('is-active') || o.getAttribute('aria-checked') === 'true'
+      );
+      return {
+        count: opts.length,
+        vals: opts.map((o) => String(o.getAttribute('data-limit-ms'))),
+        active: active.length === 1 ? String(active[0].getAttribute('data-limit-ms')) : '',
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+    })()`)
+  );
+  const limitVals = Array.isArray(limitGroup.vals) ? (limitGroup.vals as unknown[]).map(String) : [];
+  check(limitGroup.count === 4, `首页提供 4 个填词时限选项（实际 ${String(limitGroup.count)}）`);
+  check(
+    ['0', '60000', '180000', '300000'].every((v) => limitVals.includes(v)),
+    `时限选项值齐全（${JSON.stringify(limitVals)}）`
+  );
+  check(limitGroup.active === '60000', `默认选中 1 分钟（active=${String(limitGroup.active)}）`);
+  check(Number(limitGroup.overflow) <= 2, `首页时限选择组不横向溢出（overflow=${String(limitGroup.overflow)}px）`);
+
   log('\n[2] A 创建房间');
   await a.type('#nickname-input', '小明');
   await a.click('#btn-create');
   await a.waitFor('!!document.querySelector("#view-room") && getComputedStyle(document.querySelector("#view-room")).display !== "none"', 15000, '进入房间页');
   const code = ((await a.text('#room-code')) || '').trim();
   check(/^[A-Z0-9]{4}$/.test(code), `房间码格式正确（${code}）`);
+  const roomLimitA = ((await a.text('#room-limit')) || '').trim();
+  check(/1\s*分钟/.test(roomLimitA), `房间页展示本局填词时限（"${roomLimitA}"）`);
   await a.screenshot('02-room-waiting.png');
 
   log('\n[3] 玩家 B 通过邀请链接加入');
@@ -681,9 +710,16 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   await a.screenshot('04-countdown.png');
 
   // 完整跑一轮「提交→双盲→揭晓」；advance=true 则揭晓后手动进下一轮。
+  let timerChecked = false;
   async function playRound(wa: string, wb: string, o?: RoundOptions): Promise<void> {
     const opt = o || {};
     await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'A 输入开放（' + wa + '）');
+    if (!timerChecked) {
+      timerChecked = true;
+      const timerVisible = await a.isVisible('#timer');
+      const timerText = ((await a.text('#timer-text')) || '').trim();
+      check(timerVisible && (/\d+\s*秒/.test(timerText) || /^\d+:\d\d$/.test(timerText)), `计时房间显示提交倒计时（"${timerText}"）`);
+    }
     await a.type('#word-input', wa);
     await a.click('#btn-submit');
     await sleep(500);
@@ -723,20 +759,20 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   check(/对方/.test(bSawAgree), 'B 端能看到对方已确认同意词的提示');
   await a.screenshot('10-agree-voted.png');
 
-  // PROTOCOL §3/§7：一旦有人投票，本轮 4.5s 自动推进必须取消，只能手动继续
-  await sleep(REVEAL_MS + 1500);
-  check(await a.isVisible('#agree-row'), `投票后 ${((REVEAL_MS + 1500) / 1000).toFixed(1)}s 仍停在 reveal（自动推进已冻结）`);
-  check(((await a.text('#reveal-a')) || '').includes('苹果'), '冻结期间揭晓内容未被下一轮');
-  check(await a.isVisible('#btn-next'), '冻结期间仍可手动点「下一轮」');
+  // v3.2（PROTOCOL §3/§7/§10.13）：揭晓后永不自动推进，投票不再需要「冻结」计时器
+  await sleep(NO_AUTO_ADVANCE_WAIT_MS);
+  check(await a.isVisible('#agree-row'), `投票后 ${NO_AUTO_ADVANCE_WAIT_MS / 1000}s 仍停在 reveal（v3.2 揭晓不自动推进）`);
+  check(((await a.text('#reveal-a')) || '').includes('苹果'), '等待期间揭晓内容未被下一轮覆盖');
+  check(await a.isVisible('#btn-next'), '仍可手动点「进入下一轮」');
   const overlayOn = Boolean(await a.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; const cs = getComputedStyle(el); return cs.display !== "none" && el.classList.contains("is-on"); })()'));
-  check(!overlayOn, '冻结期间没有出现倒计时遮罩（确实没进下一轮）');
+  check(!overlayOn, '等待期间没有出现倒计时遮罩（确实没自动进下一轮）');
 
-  log('\n[6.5b] A 撤票 → 再投：撤票不恢复计时器');
+  log('\n[6.5b] A 撤票 → 再投：撤票不影响状态');
   await a.click('#btn-agree');
   await a.waitFor('(() => { const el = document.querySelector("#btn-agree"); return !!el && el.getAttribute("aria-pressed") === "false"; })()', 8000, 'A 撤票生效');
   check(true, 'A 撤票后 aria-pressed=false');
   await sleep(600);
-  check(await a.isVisible('#agree-row'), '撤票后仍停在 reveal（计时器不恢复）');
+  check(await a.isVisible('#agree-row'), '撤票后仍停在 reveal（本就没有自动推进）');
   await a.click('#btn-agree');
   await a.waitFor('(() => { const el = document.querySelector("#btn-agree"); return !!el && el.getAttribute("aria-pressed") === "true"; })()', 8000, 'A 再投生效');
   check(true, 'A 重新投出同意词票');
@@ -869,6 +905,7 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   await sleep(400);
   const overflowHome = Number(await b.eval('document.documentElement.scrollWidth - document.documentElement.clientWidth'));
   check(overflowHome <= 2, `375px 首页无横向溢出（overflow=${overflowHome}px）`);
+  check(await b.isVisible('#submit-limit-group'), '375px 首页填词时限选择组可见');
   await b.screenshot('16-mobile-375-home.png');
   await a.setViewport(430, 932);
   await sleep(300);
@@ -972,6 +1009,78 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   const themePageErrors = [...c.pageErrors, ...d.pageErrors];
   check(themeConsoleErrors.length === 0, `主题相关页面无 console error（${themeConsoleErrors.length} 条）`);
   check(themePageErrors.length === 0, `主题相关页面无未捕获异常（${themePageErrors.length} 条）`);
+
+  log('\n[12] v3.2 不限时房间：建房选「不限时」→ 计时区显示不限时、揭晓不自动推进');
+  const e = await browser.newPage();
+  await emulateColorScheme(e, 'dark');
+  await e.goto(APP_URL + '/');
+  await e.waitFor('!!document.querySelector("#view-home")', 15000, 'E 首页渲染');
+  await e.type('#nickname-input', '小刚');
+  const pickedUnlimited = await e.eval(`(() => {
+    const el = document.querySelector('#submit-limit-group [data-limit-ms="0"]');
+    if (!el) return false;
+    el.click();
+    return true;
+  })()`);
+  check(pickedUnlimited === true, '首页存在「不限时」选项并可点击');
+  await e.waitFor(
+    '(() => { const el = document.querySelector(\'#submit-limit-group [data-limit-ms="0"]\'); return !!el && (el.classList.contains("is-active") || el.getAttribute("aria-checked") === "true"); })()',
+    5000,
+    '「不限时」选中态'
+  );
+  check(true, '点击后「不限时」为选中态');
+  await e.click('#btn-create');
+  await e.waitFor('(() => { const v = document.querySelector("#view-room"); return !!v && getComputedStyle(v).display !== "none"; })()', 15000, 'E 进入房间页');
+  const eCode = ((await e.text('#room-code')) || '').trim();
+  check(/^[A-Z0-9]{4}$/.test(eCode), `不限时房间创建成功（${eCode}）`);
+  const eRoomLimit = ((await e.text('#room-limit')) || '').trim();
+  check(/不限时/.test(eRoomLimit), `房间页显示「不限时」（"${eRoomLimit}"）`);
+
+  const f = await browser.newPage();
+  await emulateColorScheme(f, 'dark');
+  await f.goto(`${APP_URL}/?room=${encodeURIComponent(eCode)}`);
+  await f.waitFor('!!document.querySelector("#code-input")', 15000, 'F 首页渲染');
+  await f.type('#nickname-input', '小丽');
+  await f.click('#btn-join');
+  await f.waitFor('(() => { const v = document.querySelector("#view-room"); return !!v && getComputedStyle(v).display !== "none"; })()', 15000, 'F 进入房间页');
+  const fRoomLimit = ((await f.text('#room-limit')) || '').trim();
+  check(/不限时/.test(fRoomLimit), `加入者也看到「不限时」（"${fRoomLimit}"）`);
+
+  await e.click('#btn-ready');
+  await sleep(300);
+  await f.click('#btn-ready');
+  const wordOpenExpr = '(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()';
+  await e.waitFor(wordOpenExpr, 15000, 'E 不限时房间输入开放');
+  const eTimerText = ((await e.text('#timer-text')) || '').trim();
+  check(eTimerText === '不限时', `不限时房间计时区显示「不限时」（"${eTimerText}"）`);
+  const eTrackVisible = Boolean(await e.eval('(() => { const el = document.querySelector("#timer .timer__track"); if (!el) return false; const cs = getComputedStyle(el); return cs.display !== "none" && el.getBoundingClientRect().width > 0; })()'));
+  check(!eTrackVisible, '不限时房间不显示倒计时进度条');
+  await e.screenshot('20-unlimited-room.png');
+
+  await e.type('#word-input', '海');
+  await e.click('#btn-submit');
+  await f.waitFor(wordOpenExpr, 15000, 'F 不限时房间输入开放');
+  await f.type('#word-input', '洋');
+  await f.click('#btn-submit');
+  const eRevealExpr = '(() => { const el = document.querySelector("#reveal-a"); return !!el && el.innerText.includes("海"); })()';
+  await e.waitFor(eRevealExpr, 10000, 'E 不限时房间揭晓');
+  await sleep(NO_AUTO_ADVANCE_WAIT_MS);
+  check(await e.isVisible('#reveal-a'), `不限时房间揭晓后 ${NO_AUTO_ADVANCE_WAIT_MS / 1000}s 仍停在 reveal`);
+  const eOverlay = Boolean(await e.eval('(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; return el.classList.contains("is-on") && getComputedStyle(el).display !== "none"; })()'));
+  check(!eOverlay, '不限时房间揭晓后不会自动进下一轮（无倒计时遮罩）');
+  check(await e.isVisible('#btn-next'), '不限时房间可手动进入下一轮');
+  await e.click('#btn-next');
+  const nextStarted = await e.waitFor(
+    '(() => { const el = document.querySelector("#countdown-overlay"); if (!el) return false; return el.classList.contains("is-on") && getComputedStyle(el).display !== "none"; })()',
+    8000,
+    '点「进入下一轮」后开始 3s 倒计时'
+  ).catch(() => false);
+  check(nextStarted !== false, '点「进入下一轮」后立即进入倒计时（无额外等待）');
+
+  const eConsole = [...e.consoleErrors, ...f.consoleErrors].filter((x) => x && !/favicon/i.test(x));
+  const ePageErrors = [...e.pageErrors, ...f.pageErrors];
+  check(eConsole.length === 0, `不限时房间页面无 console error（${eConsole.length} 条）`);
+  check(ePageErrors.length === 0, `不限时房间页面无未捕获异常（${ePageErrors.length} 条）`);
 
   return { a, b };
 }

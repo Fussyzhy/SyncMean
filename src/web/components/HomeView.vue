@@ -103,6 +103,24 @@ watch(
           @keydown="onNicknameKeydown"
         />
       </div>
+      <div id="submit-limit-group" class="limit" role="radiogroup" aria-label="填词时限">
+        <span class="limit__label">填词时限</span>
+        <div class="limit__options">
+          <button
+            v-for="opt in game.submitLimitOptions"
+            :key="opt.ms"
+            type="button"
+            role="radio"
+            class="limit__btn"
+            :class="{ 'is-active': opt.active }"
+            :data-limit-ms="opt.ms"
+            :aria-checked="opt.active ? 'true' : 'false'"
+            @click="game.setSubmitLimit(opt.ms)"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+      </div>
       <button
         id="btn-create"
         class="btn btn--primary btn--block"

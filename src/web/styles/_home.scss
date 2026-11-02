@@ -71,6 +71,67 @@
   color: var(--dim);
 }
 
+// ---- 填词时限选择（建房前；选中态用主按钮渐变 + 墨字） ----
+.limit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &__label {
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    color: var(--muted);
+  }
+
+  &__options {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  &__btn {
+    min-width: 0;
+    min-height: 42px;
+    padding: 0 6px;
+    border-radius: $radius-pill;
+    border: 1px solid var(--line);
+    background: var(--surface-control);
+    color: var(--muted);
+    @include button-base;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease,
+      box-shadow 0.2s ease;
+
+    &:hover:not(:disabled) {
+      color: var(--text);
+      border-color: var(--ghost-hover-line);
+    }
+
+    &:focus-visible {
+      @include focus-ring();
+    }
+
+    &.is-active {
+      color: $ink;
+      border-color: transparent;
+      background: $grad-primary;
+      font-weight: 800;
+      box-shadow: 0 10px 22px -14px var(--glow-cyan);
+    }
+  }
+}
+
+// 超窄手机：4 个选项换成 2×2，避免文字挤爆按钮
+@media (max-width: $bp-mobile-s) {
+  .limit__options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 // ---- 玩法三步 ----
 .steps {
   display: grid;

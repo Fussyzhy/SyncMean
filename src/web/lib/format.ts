@@ -116,14 +116,6 @@ export function winTitle(winBy: WinBy | null): string {
   return '本局结束';
 }
 
-/** 本轮是否已因投票取消自动推进：revealFrozen 优先，缺失时按 deadline 兜底 */
-export function isRevealFrozen(state: PublicRoomState | null | undefined): boolean {
-  if (!state || state.phase !== 'reveal') return false;
-  if (state.revealFrozen === true) return true;
-  if (state.revealFrozen === false) return false;
-  return state.deadline == null;
-}
-
 /**
  * v2.1（PROTOCOL §5.3.1）：lobby 阶段里，对方是否还留在上一局的结算页。
  * 必须「真有快照挂着」+「对方 settleDismissed 严格 === false」两条同时成立才算锁。

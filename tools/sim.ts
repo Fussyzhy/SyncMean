@@ -36,6 +36,7 @@ import type {
   RestartOk,
   RevealPayload,
   RoomErrorPayload,
+  RoundOpenPayload,
   Seat,
   ServerToClientEvents,
   SimpleOk,
@@ -449,8 +450,10 @@ async function main(): Promise<void> {
   eq(normalize('   '), '', '纯空白归一化为空串');
   ok(normalize('Ａpple') === normalize('apple'), '全角半角不影响判定');
   ok(constants.COUNTDOWN_MS === 3000, 'COUNTDOWN_MS = 3000');
-  ok(constants.SUBMIT_MS === 60000, 'SUBMIT_MS = 60000');
-  ok(constants.REVEAL_MS === 4500, 'REVEAL_MS = 4500');
+  ok(constants.DEFAULT_SUBMIT_MS === 60000, 'DEFAULT_SUBMIT_MS = 60000');
+  eq(constants.SUBMIT_LIMIT_OPTIONS, [0, 60000, 180000, 300000], 'SUBMIT_LIMIT_OPTIONS 仅 0/1/3/5 分钟');
+  ok(!hasOwn(constants, 'SUBMIT_MS'), 'constants 不再导出 SUBMIT_MS');
+  ok(!hasOwn(constants, 'REVEAL_MS'), 'constants 不再导出 REVEAL_MS');
   ok(constants.START_DELAY === 300, 'START_DELAY = 300');
   ok(constants.CODE_RE.test('AB23'), '房间码格式 A-Z2-9 四位');
   ok(!constants.CODE_RE.test('AB12'), '房间码不含易混淆的 1/0/I/O');
@@ -532,9 +535,9 @@ async function main(): Promise<void> {
       'phase',
       'players',
       'result',
-      'revealFrozen',
       'round',
       'settlePending',
+      'submitLimitMs',
       'submitted',
       'you',
     ],
@@ -545,7 +548,7 @@ async function main(): Promise<void> {
   eq(stateA1.round, 1, '初始 round = 1');
   eq(stateA1.basis, null, '首轮 basis = null');
   eq(stateA1.agree, { you: false, opponent: false }, 'lobby 阶段 agree 恒为 false');
-  eq(stateA1.revealFrozen, false, 'lobby 阶段 revealFrozen 恒为 false');
+  eq(stateA1.submitLimitMs, 60000, '默认建房（不传 submitLimitMs）-> submitLimitMs=60000（1 分钟）');
   eq(stateA1.you, { seat: 'a', name: '小明', isHost: true }, 'you 视角');
   eq(
     stateA1.players,
@@ -697,7 +700,8 @@ async function main(): Promise<void> {
   });
   eq(stateSubmitting.submitted, { you: false, opponent: false }, '输入开放时双方均未提交');
   eq(stateSubmitting.agree, { you: false, opponent: false }, 'submitting 阶段 agree 恒 false');
-  eq(stateSubmitting.revealFrozen, false, 'submitting 阶段 revealFrozen 恒 false');
+  eq(stateSubmitting.submitLimitMs, 60000, '默认房间 submitting 阶段 submitLimitMs 仍为 60000');
+  ok(typeof stateSubmitting.deadline === 'number', '默认房间 submitting 阶段 deadline 为数字');
   pass('倒计时与 open 事件');
 
   // ---------- 5. 输入校验 + 双盲提交 ----------
@@ -762,8 +766,8 @@ async function main(): Promise<void> {
   );
   pass('双盲：A 词未泄露给 B');
 
-  // ---------- 6. 首轮揭晓：不同 -> reveal -> 自动下一轮 ----------
-  step('6. 首轮揭晓「不同」并自动进入第二轮');
+  // ---------- 6. 首轮揭晓：不同 -> reveal -> 手动下一轮 ----------
+  step('6. 首轮揭晓「不同」，reveal 永不自动推进，只能由 round:next 手动继续');
   const wordB = '云朵';
   const markRevealA = A.mark();
   const markRevealB = B.mark();
@@ -823,20 +827,33 @@ async function main(): Promise<void> {
     'reveal 阶段 result'
   );
   eq(stateReveal.agree, { you: false, opponent: false }, 'reveal 初始 agree 全 false');
-  eq(stateReveal.revealFrozen, false, 'reveal 初始未冻结');
-  ok(
-    typeof stateReveal.deadline === 'number' &&
-      stateReveal.deadline > Date.now() &&
-      stateReveal.deadline - Date.now() <= 4500,
-    'reveal 的 deadline 指向 4.5 秒内'
+  eq(stateReveal.deadline, null, 'reveal 的 deadline=null（揭晓不再有任何自动推进计时器）');
+
+  // v3：reveal 永不自动推进 —— 等待一段真实时间仍停在 reveal
+  await sleep(1500);
+  eq(
+    A.log
+      .slice(markRevealA)
+      .filter((entry) => entry.event === 'round:countdown' || entry.event === 'round:open')
+      .map((entry) => entry.event),
+    [],
+    '等待 1500ms 后仍未收到 round:countdown / round:open（reveal 不会自动推进）'
   );
+  const stillRevealStates = A.log
+    .slice(markRevealA)
+    .filter((entry) => entry.event === 'room:state')
+    .map((entry) => stateOf(entry));
+  const lastStillReveal = stillRevealStates[stillRevealStates.length - 1];
+  eq(lastStillReveal.phase, 'reveal', '等待真实时间后 phase 仍为 reveal');
+  eq(lastStillReveal.deadline, null, '等待真实时间后 deadline 仍为 null');
 
   const markNextA = A.mark();
   const markNextB = B.mark();
+  eq(await emitAck(A, 'round:next', {}), { ok: true }, 'reveal 只能由 round:next 手动进入下一轮');
   const countdown2A = await waitEvent(A, 'round:countdown', (p) => Boolean(p) && p.round === 2, {
     since: markNextA,
-    timeout: 8000,
-    hint: 'reveal 4.5s 后自动进入下一轮',
+    timeout: 5000,
+    hint: 'round:next 后立即进入下一轮',
   });
   const countdown2B = await waitEvent(B, 'round:countdown', (p) => Boolean(p) && p.round === 2, {
     since: markNextB,
@@ -855,8 +872,8 @@ async function main(): Promise<void> {
   eq(stateCountdown2.result, null, '新一轮 result 清空');
   eq(stateCountdown2.history.length, 1, 'history 保留第一轮');
   eq(stateCountdown2.agree, { you: false, opponent: false }, '进入新一轮后 agree 清零');
-  eq(stateCountdown2.revealFrozen, false, '进入新一轮后 revealFrozen 清零');
-  pass('首轮判定不同 + 自动进入第二轮');
+  eq(stateCountdown2.submitLimitMs, 60000, '进入新一轮后 submitLimitMs 保持房间值 60000');
+  pass('首轮判定不同 + 手动进入第二轮');
 
   const open2A = await waitEvent(A, 'round:open', (p) => Boolean(p) && p.round === 2, {
     since: markNextA,
@@ -926,7 +943,7 @@ async function main(): Promise<void> {
   );
   eq(stateWon.deadline, null, 'won 阶段无计时器 deadline=null');
   eq(stateWon.agree, { you: false, opponent: false }, 'won 阶段 agree 恒 false');
-  eq(stateWon.revealFrozen, false, 'won 阶段 revealFrozen 恒 false');
+  eq(stateWon.submitLimitMs, 60000, 'won 阶段 submitLimitMs 保持房间值 60000');
   eq(stateWon.phase, 'won', 'phase=won');
   pass('第二轮通关');
 
@@ -994,7 +1011,7 @@ async function main(): Promise<void> {
   eq(settleB.deadline, null, '留守者 won 视角 deadline=null');
   eq(settleB.submitted, { you: false, opponent: false }, '留守者 won 视角 submitted 全 false');
   eq(settleB.agree, { you: false, opponent: false }, '留守者 won 视角 agree 全 false');
-  eq(settleB.revealFrozen, false, '留守者 won 视角 revealFrozen=false');
+  eq(settleB.submitLimitMs, 60000, '留守者 won 视角也下发房间 submitLimitMs=60000');
   eq(settleB.players.map((p) => p.settleDismissed), [true, false], 'B 视角 players.settleDismissed');
   const noticeB8 = await waitEvent(
     B,
@@ -1044,7 +1061,7 @@ async function main(): Promise<void> {
   pass('结算页各自退出（§5.3.1 / §10.9）');
 
   // ---------- 8b. v2 同意词通关全链路（PROTOCOL.md §10 第 2、3 条） ----------
-  step('8b. 同意词链路：首票冻结 -> 超时仍停留 reveal -> 撤票 -> 再投 -> 手动跨轮清零 -> 双票通关');
+  step('8b. 同意词链路：首票只记录票面 -> 停留 reveal -> 撤票 -> 再投 -> 手动跨轮清零 -> 双票通关');
   const markAgreeA = A.mark();
   const markAgreeB = B.mark();
   eq((await emitAck(A, 'player:ready', { ready: true })).ok, true, '同意局：A ready');
@@ -1085,7 +1102,7 @@ async function main(): Promise<void> {
   eq(agreeReveal1.isWin, false, '同意局首轮判定不同，停在 reveal');
   eq(agreeReveal1.winBy, null, '同意局首轮 winBy=null');
 
-  // A 投出第一票 -> 冻结自动推进
+  // A 投出第一票 -> 仅记录票面（不冻结推进、不设/清计时器）
   const markFreeze = A.mark();
   const markFreezeB = B.mark();
   const voteTrueA = await emitAck(A, 'round:agree', { agree: true });
@@ -1098,8 +1115,7 @@ async function main(): Promise<void> {
     { since: markFreeze, timeout: 3000, hint: 'A 看到自己的票' }
   );
   eq(frozenA.agree, { you: true, opponent: false }, 'A 视角 agree.you=true / opponent=false');
-  eq(frozenA.revealFrozen, true, 'A 视角 revealFrozen=true');
-  eq(frozenA.deadline, null, 'A 视角 首票后 deadline=null');
+  eq(frozenA.deadline, null, 'A 视角 reveal 的 deadline 恒为 null（没有自动推进计时器）');
   const frozenB = await waitEvent(
     B,
     'room:state',
@@ -1107,7 +1123,6 @@ async function main(): Promise<void> {
     { since: markFreezeB, timeout: 3000, hint: 'B 看到对方的票' }
   );
   eq(frozenB.agree, { you: false, opponent: true }, 'B 视角 agree.you=false / opponent=true');
-  eq(frozenB.revealFrozen, true, 'B 视角 revealFrozen=true');
   eq(frozenB.deadline, null, 'B 视角 deadline=null');
   eq(
     await emitAck(A, 'round:agree', { agree: true }),
@@ -1115,27 +1130,26 @@ async function main(): Promise<void> {
     '重复投 true 幂等且不报错'
   );
 
-  // 冻结后绝不自动推进：等待超过 REVEAL_MS 仍停在 reveal
-  const revealMs = constants.REVEAL_MS;
-  await sleep(revealMs + 900);
+  // 投票不改变推进方式：等待一段真实时间仍停在 reveal（reveal 永不自动推进）
+  await sleep(1500);
   eq(
     A.log
       .slice(markFreeze)
       .filter((entry) => entry.event === 'round:countdown' || entry.event === 'round:open')
       .map((entry) => entry.event),
     [],
-    `等待 ${revealMs + 900}ms（> REVEAL_MS）后仍无 round:countdown / round:open`
+    '等待 1500ms 后仍无 round:countdown / round:open（reveal 永不自动推进）'
   );
   const frozenStates = A.log
     .slice(markFreeze)
     .filter((entry) => entry.event === 'room:state')
     .map((entry) => stateOf(entry));
   const lastFrozen = frozenStates[frozenStates.length - 1];
-  eq(lastFrozen.phase, 'reveal', '冻结期间 phase 仍为 reveal');
-  eq(lastFrozen.deadline, null, '冻结期间 deadline 仍为 null');
-  eq(lastFrozen.agree, { you: true, opponent: false }, '冻结期间票面保持不变');
+  eq(lastFrozen.phase, 'reveal', '等待期间 phase 仍为 reveal');
+  eq(lastFrozen.deadline, null, '等待期间 deadline 仍为 null');
+  eq(lastFrozen.agree, { you: true, opponent: false }, '等待期间票面保持不变');
 
-  // 撤票：agree.you 变回 false，revealFrozen 保持 true，计时不恢复
+  // 撤票：agree.you 变回 false，reveal 依然不会自动推进
   const markWithdraw = A.mark();
   eq(
     await emitAck(A, 'round:agree', { agree: false }),
@@ -1149,8 +1163,7 @@ async function main(): Promise<void> {
     { since: markWithdraw, timeout: 3000, hint: 'A 撤票后的 state' }
   );
   eq(withdrawn.agree, { you: false, opponent: false }, '撤票后 agree.you 变回 false');
-  eq(withdrawn.revealFrozen, true, '撤票后 revealFrozen 仍为 true');
-  eq(withdrawn.deadline, null, '撤票不恢复计时器（deadline 仍 null）');
+  eq(withdrawn.deadline, null, '撤票后 deadline 仍为 null');
   await sleep(700);
   eq(
     A.log.slice(markWithdraw).filter((entry) => entry.event === 'round:countdown').length,
@@ -1180,7 +1193,7 @@ async function main(): Promise<void> {
     { since: markNextAgree, timeout: 3000 }
   );
   eq(clearedRound2.agree, { you: false, opponent: false }, '跨轮：上一轮的 agree 票已清零');
-  eq(clearedRound2.revealFrozen, false, '跨轮：revealFrozen 已清零');
+  eq(clearedRound2.submitLimitMs, 60000, '跨轮：submitLimitMs 保持房间值 60000');
   const clearedRound2B = await waitEvent(
     B,
     'room:state',
@@ -1239,7 +1252,7 @@ async function main(): Promise<void> {
   eq(wonAgree.result?.words, { a: '左边', b: '右边' }, 'won：结果为第二轮两个不同的词');
   eq(wonAgree.deadline, null, 'won：deadline=null');
   eq(wonAgree.agree, { you: false, opponent: false }, 'won 阶段 state.agree 恒 false');
-  eq(wonAgree.revealFrozen, false, 'won 阶段 state.revealFrozen 恒 false');
+  eq(wonAgree.submitLimitMs, 60000, 'won 阶段 state.submitLimitMs 保持房间值 60000');
   const agreedHistoryLast = wonAgree.history[wonAgree.history.length - 1];
   eq(
     agreedHistoryLast,
@@ -1286,7 +1299,7 @@ async function main(): Promise<void> {
     { since: markBackLobby, timeout: 3000 }
   );
   eq(lobbyAfterAgree.agree, { you: false, opponent: false }, 'restart 后 agree 清零');
-  eq(lobbyAfterAgree.revealFrozen, false, 'restart 后 revealFrozen 清零');
+  eq(lobbyAfterAgree.submitLimitMs, 60000, 'restart 后 submitLimitMs 保持房间值 60000');
   eq(lobbyAfterAgree.history, [], 'restart 后 history 清空');
   eq(lobbyAfterAgree.result, null, 'restart 后 result=null');
   const agreeSettleB = await waitEvent(
@@ -1397,6 +1410,245 @@ async function main(): Promise<void> {
 
   pass('离开与删房');
 
+  // ---------- 11b. 房间级填词时限（submitLimitMs）端到端 ----------
+  step('11b. 房间级填词时限：非法值拒绝 / 缺省 1 分钟 / 自定义 3 分钟 / 不限时 / restart 保持');
+  const invalidLimitNumber = asError(
+    await emitAck(D, 'room:create', {
+      name: '非法甲',
+      submitLimitMs: 90000 as unknown as CreatePayload['submitLimitMs'],
+    })
+  );
+  eq(invalidLimitNumber.error, 'INVALID_SUBMIT_LIMIT', '90000 不在可选项 -> INVALID_SUBMIT_LIMIT');
+  eq(
+    invalidLimitNumber.message,
+    '填词时限只能是不限时 / 1 分钟 / 3 分钟 / 5 分钟',
+    'INVALID_SUBMIT_LIMIT 中文提示与协议一致'
+  );
+  eq(
+    Object.keys(invalidLimitNumber).sort(),
+    ['error', 'message', 'ok'],
+    '非法时限错误返回字段仅 {ok,error,message}'
+  );
+  const invalidLimitString = asError(
+    await emitAck(D, 'room:create', {
+      name: '非法乙',
+      submitLimitMs: '60000' as unknown as CreatePayload['submitLimitMs'],
+    })
+  );
+  eq(invalidLimitString.error, 'INVALID_SUBMIT_LIMIT', '字符串 "60000" -> INVALID_SUBMIT_LIMIT');
+  eq((await fetchJson('/health')).body.rooms, 0, '非法 submitLimitMs 不会创建房间');
+
+  const E = await connectClient('E');
+  const F = await connectClient('F');
+
+  // null 视为缺省 60000
+  const markNullLimit = E.mark();
+  const nullLimitCreated = asOk(
+    await emitAck(E, 'room:create', {
+      name: '缺省甲',
+      submitLimitMs: null as unknown as CreatePayload['submitLimitMs'],
+    })
+  );
+  const nullLimitState = await waitEvent(
+    E,
+    'room:state',
+    (s) => s.code === nullLimitCreated.code && s.phase === 'lobby',
+    { since: markNullLimit, timeout: 3000 }
+  );
+  eq(nullLimitState.submitLimitMs, 60000, 'submitLimitMs=null 按缺省 60000 处理');
+  eq(await emitAck(E, 'room:leave', {}), { ok: true }, '缺省房间用完即离开');
+
+  // 自定义 180000（3 分钟）
+  const mark180 = E.mark();
+  const created180 = asOk(
+    await emitAck(E, 'room:create', { name: '三分钟甲', submitLimitMs: 180000 })
+  );
+  const code180 = created180.code;
+  const lobby180 = await waitEvent(E, 'room:state', (s) => s.code === code180, {
+    since: mark180,
+    timeout: 3000,
+  });
+  eq(lobby180.submitLimitMs, 180000, '创建时传 180000 -> lobby state.submitLimitMs=180000');
+  asOk(await emitAck(F, 'room:join', { code: code180, name: '三分钟乙' }));
+  const mark180Open = E.mark();
+  eq((await emitAck(E, 'player:ready', { ready: true })).ok, true, '180000 房：A ready');
+  eq((await emitAck(F, 'player:ready', { ready: true })).ok, true, '180000 房：B ready');
+  const open180 = await waitEvent(E, 'round:open', (p) => Boolean(p) && p.round === 1, {
+    since: mark180Open,
+    timeout: 6000,
+    hint: '180000 房进入提交阶段',
+  });
+  ok(open180.deadline !== null, '180000 房 round:open.deadline 不为 null');
+  const delta180 = open180.deadline === null ? -1 : open180.deadline - Date.now();
+  ok(
+    delta180 > 170000 && delta180 <= 182000,
+    `180000 房 round:open.deadline ≈ now + 180000（实际 ${delta180}ms）`
+  );
+  const submitting180 = await waitEvent(E, 'room:state', (s) => s.phase === 'submitting', {
+    since: mark180Open,
+    timeout: 3000,
+  });
+  eq(submitting180.submitLimitMs, 180000, '180000 房 submitting 阶段 submitLimitMs 保持 180000');
+  const limitWord = '同一片天空';
+  eq((await emitAck(E, 'round:submit', { word: limitWord })).ok, true, '180000 房 A 提交');
+  eq((await emitAck(F, 'round:submit', { word: limitWord })).ok, true, '180000 房 B 提交同词');
+  const reveal180 = await waitEvent(E, 'round:reveal', (p) => Boolean(p) && p.round === 1, {
+    since: mark180Open,
+    timeout: 5000,
+  });
+  eq(reveal180.isWin, true, '180000 房同词通关');
+  const markRestart180 = E.mark();
+  eq(
+    await emitAck(E, 'game:restart', {}),
+    { ok: true, watching: true },
+    '180000 房 A 退出结算（B 仍留守）'
+  );
+  const lobby180After = await waitEvent(
+    E,
+    'room:state',
+    (s) => s.phase === 'lobby' && s.round === 1,
+    { since: markRestart180, timeout: 3000 }
+  );
+  eq(
+    lobby180After.submitLimitMs,
+    180000,
+    'game:restart 后新 lobby 的 submitLimitMs 仍为 180000（房间级参数整局不变）'
+  );
+  eq((await emitAck(F, 'game:restart', {})).ok, true, '180000 房 B 也退出结算');
+  eq((await emitAck(E, 'room:leave', {})).ok, true, '180000 房 A 离开');
+  eq((await emitAck(F, 'room:leave', {})).ok, true, '180000 房 B 离开');
+
+  // 不限时（0）
+  const markUnlimited = E.mark();
+  const createdUnlimited = asOk(
+    await emitAck(E, 'room:create', { name: '不限时甲', submitLimitMs: 0 })
+  );
+  const codeUnlimited = createdUnlimited.code;
+  const lobbyUnlimited = await waitEvent(E, 'room:state', (s) => s.code === codeUnlimited, {
+    since: markUnlimited,
+    timeout: 3000,
+  });
+  eq(lobbyUnlimited.submitLimitMs, 0, '创建时传 0 -> state.submitLimitMs=0（不限时）');
+  asOk(await emitAck(F, 'room:join', { code: codeUnlimited, name: '不限时乙' }));
+  const markUnlimitedOpen = E.mark();
+  eq((await emitAck(E, 'player:ready', { ready: true })).ok, true, '不限时房：A ready');
+  eq((await emitAck(F, 'player:ready', { ready: true })).ok, true, '不限时房：B ready');
+  const openUnlimited = await waitEvent(E, 'round:open', (p) => Boolean(p) && p.round === 1, {
+    since: markUnlimitedOpen,
+    timeout: 6000,
+    hint: '不限时房进入提交阶段',
+  });
+  eq(openUnlimited.deadline, null, '不限时房 round:open.deadline=null');
+  const stateUnlimited = await waitEvent(E, 'room:state', (s) => s.phase === 'submitting', {
+    since: markUnlimitedOpen,
+    timeout: 3000,
+  });
+  eq(stateUnlimited.submitLimitMs, 0, '不限时房 submitting 阶段 submitLimitMs=0');
+  eq(stateUnlimited.deadline, null, '不限时房 submitting 阶段 deadline=null');
+  const markUnlimitedWait = E.mark();
+  await sleep(1300);
+  eq(
+    E.log
+      .slice(markUnlimitedWait)
+      .filter((entry) => entry.event === 'round:reveal' || entry.event === 'round:countdown')
+      .map((entry) => entry.event),
+    [],
+    '不限时房等待 1300ms 后仍无 round:reveal / round:countdown（不会自动揭晓）'
+  );
+  eq((await emitAck(E, 'round:submit', { word: '月亮' })).ok, true, '不限时房 A 提交');
+  // 提交只会触发一次 state 广播；此刻仍是 submitting，证明等待期间没有被超时推进
+  const unlimitedAfterWait = await waitEvent(
+    E,
+    'room:state',
+    (s) => s.phase === 'submitting' && s.submitted.you === true,
+    { since: markUnlimitedWait, timeout: 3000 }
+  );
+  eq(unlimitedAfterWait.phase, 'submitting', '不限时房等待后仍停在 submitting');
+  eq(unlimitedAfterWait.deadline, null, '不限时房等待后 deadline 仍为 null');
+  eq(unlimitedAfterWait.submitLimitMs, 0, '不限时房等待后 submitLimitMs 仍为 0');
+  eq((await emitAck(F, 'round:submit', { word: '星星' })).ok, true, '不限时房 B 提交');
+  const revealUnlimited = await waitEvent(E, 'round:reveal', (p) => Boolean(p) && p.round === 1, {
+    since: markUnlimitedOpen,
+    timeout: 5000,
+    hint: '不限时房双方提交后正常揭晓',
+  });
+  eq(revealUnlimited.words, { a: '月亮', b: '星星' }, '不限时房双方提交后正常 round:reveal');
+  const stateRevealUnlimited = await waitEvent(E, 'room:state', (s) => s.phase === 'reveal', {
+    since: markUnlimitedOpen,
+    timeout: 3000,
+  });
+  eq(stateRevealUnlimited.deadline, null, '不限时房 reveal 阶段 deadline=null（不自动推进）');
+  eq((await emitAck(E, 'room:leave', {})).ok, true, '不限时房 A 离开');
+  eq((await emitAck(F, 'room:leave', {})).ok, true, '不限时房 B 离开');
+  await sleep(200);
+  eq((await fetchJson('/health')).body.rooms, 0, '时限用例结束后房间均已删除');
+  pass('房间级填词时限（submitLimitMs）');
+
+  // ---------- 11c. _openRound 时限分支（直接驱动状态机） ----------
+  step('11c. _openRound 时限分支：默认 60s / 不限时（直接驱动，不等真实计时）');
+  const gOpen = new GameModule();
+  const openEvents: { event: string; payload: unknown }[] = [];
+  gOpen.emitToRoom = (
+    _roomCode: string,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    openEvents.push({ event, payload });
+  };
+
+  const openDefaultRoom = gOpen.rooms.get(
+    asOk(gOpen.createRoom('open-def', { name: '甲' })).code
+  ) as Room;
+  eq(openDefaultRoom.submitLimitMs, 60000, '缺省房间 Room.submitLimitMs=60000');
+  openDefaultRoom.phase = 'countdown';
+  const openDefaultAt = Date.now();
+  gOpen._openRound(openDefaultRoom);
+  eq(openDefaultRoom.phase, 'submitting', '默认房间 _openRound 后进入 submitting');
+  ok(openDefaultRoom.deadline !== null, '默认房间 _openRound 设置 deadline');
+  if (openDefaultRoom.deadline !== null) {
+    ok(
+      openDefaultRoom.deadline - openDefaultAt >= 59000 &&
+        openDefaultRoom.deadline - openDefaultAt <= 61000,
+      `默认房间 deadline ≈ now + 60000（实际 ${openDefaultRoom.deadline - openDefaultAt}ms）`
+    );
+  }
+  ok(openDefaultRoom.timer !== null, '默认房间 _openRound 安装了超时计时器');
+  const openPayloadDefault = openEvents
+    .filter((entry) => entry.event === 'round:open')
+    .pop()?.payload as RoundOpenPayload;
+  eq(openPayloadDefault.deadline, openDefaultRoom.deadline, 'round:open 载荷带同一个 deadline');
+
+  const openFreeRoom = gOpen.rooms.get(
+    asOk(gOpen.createRoom('open-free', { name: '甲', submitLimitMs: 0 })).code
+  ) as Room;
+  eq(openFreeRoom.submitLimitMs, 0, '不限时房间 Room.submitLimitMs=0');
+  openFreeRoom.phase = 'countdown';
+  const beforeFreeEvents = openEvents.length;
+  const openFreeAt = Date.now();
+  gOpen._openRound(openFreeRoom);
+  eq(openFreeRoom.deadline, null, '不限时 _openRound：deadline=null');
+  eq(openFreeRoom.timer, null, '不限时 _openRound：不安装超时计时器');
+  ok(Date.now() - openFreeAt < 1000, '不限时 _openRound 立即返回（不等任何计时器）');
+  const openPayloadFree = openEvents
+    .slice(beforeFreeEvents)
+    .find((entry) => entry.event === 'round:open')?.payload as RoundOpenPayload;
+  eq(openPayloadFree.deadline, null, '不限时 round:open 载荷 deadline=null');
+
+  const openLongRoom = gOpen.rooms.get(
+    asOk(gOpen.createRoom('open-long', { name: '甲', submitLimitMs: 180000 })).code
+  ) as Room;
+  openLongRoom.phase = 'countdown';
+  const openLongAt = Date.now();
+  gOpen._openRound(openLongRoom);
+  ok(openLongRoom.deadline !== null, '180000 房间 _openRound 设置 deadline');
+  if (openLongRoom.deadline !== null) {
+    const longDelta = openLongRoom.deadline - openLongAt;
+    ok(longDelta >= 179000 && longDelta <= 181000, `180000 房间 deadline ≈ now + 180000（实际 ${longDelta}ms）`);
+  }
+  ok(openLongRoom.timer !== null, '180000 房间 _openRound 安装了超时计时器');
+  gOpen.shutdown();
+  pass('_openRound 时限分支');
+
   // ---------- 12. 超时自动提交（直接驱动状态机，不等待真实 60s） ----------
   step('12. 超时自动填「词穷」并正常判定');
   const gTimeout = new GameModule();
@@ -1420,6 +1672,8 @@ async function main(): Promise<void> {
   eq(timeoutReveal.timedOut, { a: false, b: true }, 'timedOut 标记正确');
   eq(timeoutReveal.isWin, false, '「苹果」与「词穷」判定为不同');
   eq(timeoutRoom.phase, 'reveal', '不同 -> 进入 reveal');
+  eq(timeoutRoom.deadline, null, '超时揭晓后进入 reveal，deadline=null');
+  eq(timeoutRoom.timer, null, '超时揭晓后不残留自动推进计时器');
   gTimeout.shutdown();
   pass('超时兜底');
 
@@ -1492,7 +1746,7 @@ async function main(): Promise<void> {
   pass('离线房间清理');
 
   // ---------- 16. setAgree 状态机内部规则（直接驱动，不等待真实计时） ----------
-  step('16. setAgree 内部规则：冻结、幂等、通关写 history/notice、视角门控、跨轮清零');
+  step('16. setAgree 内部规则：票面、幂等、通关写 history/notice、视角门控、跨轮清零');
   const gAgree = new GameModule();
   const agreeRoomEvents: { event: string; payload: unknown }[] = [];
   const agreePlayerEvents: { seat: Seat; event: string; payload: unknown }[] = [];
@@ -1514,12 +1768,13 @@ async function main(): Promise<void> {
     agreePlayerEvents.push({ seat: player.seat, event, payload });
   };
   eq(agreeRoom.agree, { a: false, b: false }, 'createRoom：Room.agree 初值全 false');
-  eq(agreeRoom.revealFrozen, false, 'createRoom：Room.revealFrozen 初值 false');
+  eq(agreeRoom.submitLimitMs, 60000, 'createRoom：Room.submitLimitMs 初值 60000（缺省）');
   eq(asError(gAgree.setAgree('agree-a', true)).error, 'BAD_PHASE', 'lobby 阶段投票 -> BAD_PHASE');
   eq(asError(gAgree.setAgree('ghost-socket', true)).error, 'NOT_IN_ROOM', '不在房间投票 -> NOT_IN_ROOM');
 
   agreeRoom.phase = 'reveal';
-  agreeRoom.deadline = Date.now() + constants.REVEAL_MS;
+  // 新语义：reveal 阶段 deadline 恒为 null，也不存在任何自动推进计时器
+  agreeRoom.deadline = null;
   agreeRoom.result = {
     round: 1,
     words: { a: '苹果', b: '云朵' },
@@ -1536,19 +1791,11 @@ async function main(): Promise<void> {
     agree: { a: false, b: false },
     winBy: null,
   });
-  let autoAdvanced = false;
-  gAgree._setTimer(
-    agreeRoom,
-    () => {
-      autoAdvanced = true;
-    },
-    300
-  );
+  eq(agreeRoom.timer, null, 'reveal 阶段初始没有计时器（揭晓永不自动推进）');
 
   eq(gAgree.setAgree('agree-a'), { ok: true, agree: { a: true, b: false }, winBy: null }, '入参缺省视为 true');
-  eq(agreeRoom.revealFrozen, true, '首票即冻结自动推进');
-  eq(agreeRoom.deadline, null, '首票后 deadline=null');
-  eq(agreeRoom.timer, null, '首票已 clearTimeout，room.timer=null');
+  eq(agreeRoom.deadline, null, '首票后 deadline 仍为 null');
+  eq(agreeRoom.timer, null, '投票不创建计时器（reveal 永不自动推进）');
   eq(agreeRoom.result?.agree, { a: true, b: false }, 'result.agree 反映当前票面');
   eq(agreeRoom.result?.winBy, null, '单票不改 winBy');
   eq(agreeRoom.phase, 'reveal', '单票仍停在 reveal');
@@ -1564,10 +1811,17 @@ async function main(): Promise<void> {
     '撤票返回清零后的票面'
   );
   eq(agreeRoom.agree, { a: false, b: false }, '撤票只清自己座位');
-  eq(agreeRoom.revealFrozen, true, '撤票不解除冻结');
-  eq(agreeRoom.timer, null, '撤票不恢复计时器');
+  eq(agreeRoom.timer, null, '撤票也不创建计时器');
   await sleep(420);
-  eq(autoAdvanced, false, '冻结后计时器绝不触发自动推进');
+  eq(agreeRoom.phase, 'reveal', '等待 420ms 后仍停在 reveal');
+  eq(agreeRoom.deadline, null, '等待 420ms 后 deadline 仍为 null');
+  eq(
+    agreeRoomEvents.filter(
+      (entry) => entry.event === 'round:countdown' || entry.event === 'round:open'
+    ).length,
+    0,
+    'setAgree 从不触发 round:countdown / round:open'
+  );
 
   eq(asOk(gAgree.setAgree('agree-a', true)).agree, { a: true, b: false }, '重新投票');
   eq(
@@ -1602,21 +1856,20 @@ async function main(): Promise<void> {
     ],
     'won 的 state.agree 恒为 false'
   );
-  eq(wonViews.map((e) => stateOf(e).revealFrozen), [false, false], 'won 的 state.revealFrozen 恒为 false');
+  eq(wonViews.map((e) => stateOf(e).submitLimitMs), [60000, 60000], 'won 的 state.submitLimitMs 保持房间值');
   eq(stateOf(wonViews[0]).history[0].winBy, 'agree', 'state.history 下发 winBy');
   eq(stateOf(wonViews[0]).result?.agree, { a: true, b: true }, 'state.result 下发 agree');
   eq(asError(gAgree.setAgree('agree-a', true)).error, 'BAD_PHASE', 'won 阶段再投 -> BAD_PHASE');
 
   // 视角门控：内部脏值也不得外泄
   agreeRoom.agree = { a: true, b: true };
-  agreeRoom.revealFrozen = true;
   const wonDirtyView = gAgree.getState(agreeRoom, agreeRoom.players.find((p) => p.seat === 'a') as Player);
   eq(wonDirtyView.agree, { you: false, opponent: false }, '非 reveal：state.agree 恒 false（脏值也不外泄）');
-  eq(wonDirtyView.revealFrozen, false, '非 reveal：revealFrozen 恒 false');
+  eq(wonDirtyView.submitLimitMs, 60000, '非 reveal：state.submitLimitMs 仍下发房间值');
   agreeRoom.phase = 'reveal';
   const dirtyRevealA = gAgree.getState(agreeRoom, agreeRoom.players.find((p) => p.seat === 'a') as Player);
   eq(dirtyRevealA.agree, { you: true, opponent: true }, 'reveal：A 视角 you/opponent');
-  eq(dirtyRevealA.revealFrozen, true, 'reveal：revealFrozen 下发');
+  eq(dirtyRevealA.submitLimitMs, 60000, 'reveal：state.submitLimitMs 下发房间值');
   agreeRoom.agree = { a: true, b: false };
   eq(
     gAgree.getState(agreeRoom, agreeRoom.players.find((p) => p.seat === 'b') as Player).agree,
@@ -1630,20 +1883,17 @@ async function main(): Promise<void> {
     'lobby：即使 agree.a=true 也恒 false'
   );
 
-  // 跨轮清零
+  // 跨轮清零（submitLimitMs 是房间级参数，任何换轮 / 重开都不得重置）
   agreeRoom.phase = 'reveal';
   agreeRoom.agree = { a: true, b: true };
-  agreeRoom.revealFrozen = true;
   gAgree._advanceRound(agreeRoom);
   eq(agreeRoom.agree, { a: false, b: false }, '_advanceRound 清零 agree');
-  eq(agreeRoom.revealFrozen, false, '_advanceRound 清零 revealFrozen');
+  eq(agreeRoom.submitLimitMs, 60000, '_advanceRound 不重置 submitLimitMs');
   agreeRoom.agree = { a: true, b: true };
-  agreeRoom.revealFrozen = true;
   gAgree._startCountdown(agreeRoom);
   eq(agreeRoom.agree, { a: false, b: false }, '_startCountdown 清零 agree');
-  eq(agreeRoom.revealFrozen, false, '_startCountdown 清零 revealFrozen');
+  eq(agreeRoom.submitLimitMs, 60000, '_startCountdown 不重置 submitLimitMs');
   agreeRoom.agree = { a: true, b: true };
-  agreeRoom.revealFrozen = true;
   agreeRoom.phase = 'won';
   eq(
     gAgree.restart('agree-a'),
@@ -1651,7 +1901,7 @@ async function main(): Promise<void> {
     'won 阶段 restart 成功（对方未退出 -> watching=true）'
   );
   eq(agreeRoom.agree, { a: false, b: false }, 'restart 清零 agree');
-  eq(agreeRoom.revealFrozen, false, 'restart 清零 revealFrozen');
+  eq(agreeRoom.submitLimitMs, 60000, 'restart 不重置 submitLimitMs');
   eq(agreeRoom.round, 1, 'restart 后 round=1');
   gAgree.shutdown();
   pass('setAgree 内部规则');
@@ -1771,7 +2021,7 @@ async function main(): Promise<void> {
   eq(viewB.deadline, null, 'B：deadline=null');
   eq(viewB.submitted, { you: false, opponent: false }, 'B：submitted 全 false');
   eq(viewB.agree, { you: false, opponent: false }, 'B：agree 全 false');
-  eq(viewB.revealFrozen, false, 'B：revealFrozen=false');
+  eq(viewB.submitLimitMs, 60000, 'B：快照视角也下发房间 submitLimitMs');
   eq(viewB.players.map((p) => p.settleDismissed), [true, false], 'B：players 暴露退出标记');
   eq(viewA.phase, 'lobby', 'A：看到真实 lobby');
   eq(viewA.round, 1, 'A：真实 round=1');
