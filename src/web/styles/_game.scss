@@ -31,6 +31,21 @@
     letter-spacing: 0.16em;
     color: var(--cyan);
   }
+
+  // 右侧动作区：「结束本局」+「退出」
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+  }
+}
+
+// 「结束本局」二次确认态：警示色文字/描边（4s 内不点就恢复）
+.btn-exit.is-confirm,
+.btn-exit.is-confirm:hover {
+  color: var(--warn);
+  border-color: var(--warn);
 }
 
 // ---- 对局中对方掉线横幅（警示色文字 + 中性控件面，深浅主题都可见） ----
@@ -139,6 +154,45 @@
   }
 }
 
+// ---- 等待时的快捷表情（3 个小胶囊，一行放不下就换行） ----
+.emote-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.emote-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border-radius: $radius-pill;
+  border: 1px solid var(--line);
+  background: var(--surface-control);
+  color: var(--text);
+  @include button-base;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: border-color 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+
+  &:hover:not(:disabled) {
+    border-color: var(--ghost-hover-line);
+    background: var(--ghost-hover-bg);
+  }
+
+  &:focus-visible {
+    @include focus-ring();
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
 // ---- 倒计时进度条 ----
 .timer {
   display: flex;
@@ -179,5 +233,17 @@
   // 不限时：没有进度条，只保留右侧的「不限时」文案
   &--unlimited {
     justify-content: flex-end;
+  }
+}
+
+// 超窄手机：顶栏两个按钮收紧，避免「第 N 轮 / 房间码」被挤
+@media (max-width: $bp-mobile-s) {
+  .game-top__actions {
+    gap: 6px;
+
+    .btn-exit {
+      padding: 0 10px;
+      font-size: 12px;
+    }
   }
 }

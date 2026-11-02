@@ -8,6 +8,7 @@
  * 保留全部 63 条对局 check（+ --smoke 1 条），未放宽任何断言；DOM id 与 PROTOCOL.md §9 一致。
  * v3.2 追加：建房填词时限（默认 / 不限时）、不限时房间计时区、揭晓不自动推进、375px 时限选择组。
  * v3.3 追加：安全响应头与 /assets 长缓存、等待仪表盘（已等 m:ss）、对手掉线横幅与复制邀请入口。
+ * v3.4 追加：快捷表情（催一下）、结束本局（二次确认）后双方结算、再来一局自动准备。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -744,6 +745,7 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   // 完整跑一轮「提交→双盲→揭晓」；advance=true 则揭晓后手动进下一轮。
   let timerChecked = false;
   let waitingChecked = false;
+  let emoteChecked = false;
   async function playRound(wa: string, wb: string, o?: RoundOptions): Promise<void> {
     const opt = o || {};
     await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'A 输入开放（' + wa + '）');
@@ -763,6 +765,18 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
         /已提交/.test(waitingText) && /等对方/.test(waitingText) && /已等\s*\d+:\d\d/.test(waitingText),
         `等待仪表盘显示已等时长（"${waitingText}"）`
       );
+    }
+    if (!emoteChecked) {
+      emoteChecked = true;
+      check(await a.isVisible('#emote-row'), '等待时出现快捷表情行 #emote-row');
+      await a.click('#btn-emote-nudge');
+      const gotEmote = await b
+        .waitFor('document.body.innerText.includes("催你啦")', 4000, 'B 收到快捷表情')
+        .catch(() => false);
+      check(gotEmote !== false, '快捷表情送达对方（B 收到「催你啦」提示）');
+      await sleep(300);
+      const emoteDisabled = await a.eval('(() => { const el = document.querySelector("#btn-emote-nudge"); return !!el && !!el.disabled; })()');
+      check(emoteDisabled === true, '快捷表情发送后进入冷却（按钮 disabled）');
     }
     const bText = await b.bodyText();
     check(!bText.includes(wa), '双盲：B 提交前看不到 A 的词「' + wa + '」');
@@ -911,13 +925,17 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   }
   await a.screenshot('13-room-after-restart.png');
 
+  // v3.4：双方都点过「再来一局」→ 自动准备，无需再手动点准备
+  const autoStarted = await a
+    .waitFor(
+      '(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()',
+      15000,
+      '自动准备后进入第二局'
+    )
+    .catch(() => false);
+  check(autoStarted !== false, '双方都点「再来一局」后自动准备并直接开局（不用手动点准备）');
+
   log('\n[8] 第二局：一轮就提交相同词 → 直接通关（不应出现投票区）');
-  await a.click('#btn-ready');
-  await sleep(300);
-  const readyA2 = await a.busyState('#btn-ready');
-  check(!!readyA2 && !readyA2.isBusy, `第二次点准备后仍无 loading 残留（is-busy=${readyA2 && readyA2.isBusy}）`);
-  await b.click('#btn-ready');
-  await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, '第二局第 1 轮输入开放');
   await a.type('#word-input', '彩虹');
   await a.click('#btn-submit');
   await b.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'B 第二局输入开放');
@@ -1136,6 +1154,58 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   );
   check(await e.isVisible('#btn-copy-waiting'), '对手离线且等待时显示「复制邀请链接」入口 #btn-copy-waiting');
   check(await e.isVisible('#opponent-offline'), '输入开放后对手掉线横幅仍然可见');
+
+  log('\n[14] v3.4 结束本局（二次确认）→ 双方结算 → 再来一局自动准备');
+  const g = await browser.newPage();
+  await emulateColorScheme(g, 'dark');
+  await g.goto(APP_URL + '/');
+  await g.waitFor('!!document.querySelector("#view-home")', 15000, 'G 首页渲染');
+  await g.type('#nickname-input', '阿刚');
+  await g.click('#btn-create');
+  await g.waitFor('(() => { const v = document.querySelector("#view-room"); return !!v && getComputedStyle(v).display !== "none"; })()', 15000, 'G 进入房间页');
+  const gCode = ((await g.text('#room-code')) || '').trim();
+  check(/^[A-Z0-9]{4}$/.test(gCode), `结束局房间创建成功（${gCode}）`);
+  const h = await browser.newPage();
+  await emulateColorScheme(h, 'dark');
+  await h.goto(`${APP_URL}/?room=${encodeURIComponent(gCode)}`);
+  await h.waitFor('!!document.querySelector("#code-input")', 15000, 'H 首页渲染');
+  await h.type('#nickname-input', '阿丽');
+  await h.click('#btn-join');
+  await h.waitFor('(() => { const v = document.querySelector("#view-room"); return !!v && getComputedStyle(v).display !== "none"; })()', 15000, 'H 进入房间页');
+  await g.click('#btn-ready');
+  await sleep(300);
+  await h.click('#btn-ready');
+  const wordOpen =
+    '(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()';
+  await g.waitFor(wordOpen, 15000, 'G 输入开放');
+  await g.type('#word-input', '海');
+  await g.click('#btn-submit');
+  await h.waitFor(wordOpen, 15000, 'H 输入开放');
+  await h.type('#word-input', '洋');
+  await h.click('#btn-submit');
+  await g.waitFor('(() => { const el = document.querySelector("#reveal-a"); return !!el && el.innerText.includes("海"); })()', 10000, 'G 揭晓');
+  check(await g.isVisible('#btn-end'), '对局中出现「结束本局」按钮 #btn-end');
+  await g.click('#btn-end');
+  const confirmShown = await g
+    .waitFor('(() => { const el = document.querySelector("#btn-end"); return !!el && el.innerText.includes("确认结束"); })()', 4000, '结束本局二次确认')
+    .catch(() => false);
+  check(confirmShown !== false, '第一次点击「结束本局」进入二次确认（文案「确认结束？」）');
+  await g.click('#btn-end');
+  await g.waitFor('(() => { const v = document.querySelector("#view-settle"); return !!v && getComputedStyle(v).display !== "none"; })()', 10000, 'G 进入结算视图');
+  await h.waitFor('(() => { const v = document.querySelector("#view-settle"); return !!v && getComputedStyle(v).display !== "none"; })()', 10000, 'H 进入结算视图');
+  check(true, '结束本局后双方都进入结算视图');
+  const endTitle = ((await g.text('#settle-title')) || '').trim();
+  check(/本局结束/.test(endTitle), `结算标题为「本局结束」（"${endTitle}"）`);
+  const endRounds = (await g.text('#settle-rounds')) || '';
+  check(endRounds.includes('海') && endRounds.includes('洋'), '结束本局的结算保留了已玩轮次（海 / 洋）');
+  await g.screenshot('21-settle-ended.png');
+  await g.click('#btn-restart');
+  await sleep(300);
+  await h.click('#btn-restart');
+  const autoSecond = await g.waitFor(wordOpen, 20000, '结束本局后自动准备进入下一局').catch(() => false);
+  check(autoSecond !== false, '结束本局 → 双方再来一局后自动准备并直接开局');
+  const ghConsole = [...g.consoleErrors, ...h.consoleErrors].filter((x) => x && !/favicon/i.test(x));
+  check(ghConsole.length === 0, `结束局页面无 console error（${ghConsole.length} 条）`);
 
   return { a, b };
 }

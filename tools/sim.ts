@@ -27,6 +27,8 @@ import type {
   CreateOk,
   CreatePayload,
   EmptyPayload,
+  EmoteOk,
+  EmotePayload,
   HistoryItem,
   JoinOk,
   JoinPayload,
@@ -108,6 +110,8 @@ interface ClientPayloads {
   'round:agree': AgreePayload;
   'round:next': EmptyPayload;
   'game:restart': EmptyPayload;
+  'room:emote': EmotePayload;
+  'game:end': EmptyPayload;
 }
 
 /** 客户端 → 服务端事件的 ack 结果类型（供断言收窄） */
@@ -120,6 +124,8 @@ interface AckResults {
   'round:agree': ActionResult<AgreeOk>;
   'round:next': ActionResult<SimpleOk>;
   'game:restart': ActionResult<RestartOk>;
+  'room:emote': ActionResult<EmoteOk>;
+  'game:end': ActionResult<SimpleOk>;
 }
 
 interface WaitEventOptions {
@@ -456,6 +462,7 @@ async function main(): Promise<void> {
   eq(normalize('   '), '', '纯空白归一化为空串');
   ok(normalize('Ａpple') === normalize('apple'), '全角半角不影响判定');
   ok(constants.COUNTDOWN_MS === 3000, 'COUNTDOWN_MS = 3000');
+  ok(constants.EMOTE_COOLDOWN_MS === 8000, 'EMOTE_COOLDOWN_MS = 8000');
   ok(constants.DEFAULT_SUBMIT_MS === 60000, 'DEFAULT_SUBMIT_MS = 60000');
   eq(constants.SUBMIT_LIMIT_OPTIONS, [0, 60000, 180000, 300000], 'SUBMIT_LIMIT_OPTIONS 仅 0/1/3/5 分钟');
   ok(!hasOwn(constants, 'SUBMIT_MS'), 'constants 不再导出 SUBMIT_MS');
@@ -1672,6 +1679,219 @@ async function main(): Promise<void> {
   gOpen.shutdown();
   pass('_openRound 时限分支');
 
+  // ---------- 11d. v3.4 快捷表情 room:emote 协议级 ----------
+  step('11d. room:emote：lobby 拒绝、对方离线不送达、重连后可送达、冷却与非法 kind');
+
+  // lobby 阶段：即使 kind 合法也拒绝
+  asOk(await emitAck(D, 'room:create', { name: '表情房主' }));
+  const lobbyEmote = asError(await emitAck(D, 'room:emote', { kind: 'nudge' }));
+  eq(lobbyEmote.error, 'BAD_PHASE', 'lobby 阶段发 room:emote -> BAD_PHASE');
+  eq((await emitAck(D, 'room:leave', {})).ok, true, '表情 lobby 校验房用完即离开');
+  eq(asError(await emitAck(D, 'room:emote', { kind: 'nudge' })).error, 'NOT_IN_ROOM', '不在房间发 room:emote -> NOT_IN_ROOM');
+
+  const M = await connectClient('M');
+  const N = await connectClient('N');
+  const emoteCreate = asOk(await emitAck(M, 'room:create', { name: '表情甲' }));
+  const emoteCode = emoteCreate.code;
+  const emoteJoinN = asOk(await emitAck(N, 'room:join', { code: emoteCode, name: '表情乙' }));
+  const tokenN = emoteJoinN.token;
+  const markEmoteOpen = M.mark();
+  eq((await emitAck(M, 'player:ready', { ready: true })).ok, true, '表情房 A ready');
+  eq((await emitAck(N, 'player:ready', { ready: true })).ok, true, '表情房 B ready');
+  await waitEvent(M, 'round:open', (p) => Boolean(p) && p.round === 1, {
+    since: markEmoteOpen,
+    timeout: 6000,
+    hint: '表情房进入提交阶段',
+  });
+
+  // 对方离线：不送达且不发 notice（冷却也不消耗）
+  N.disconnect();
+  const markEmoteOffline = M.mark();
+  await waitEvent(
+    M,
+    'room:state',
+    (s) => {
+      const b = s.players.find((p) => p.seat === 'b');
+      return b !== undefined && b.connected === false;
+    },
+    { since: markEmoteOffline, timeout: 3000, hint: 'A 看到 B 离线' }
+  );
+  eq(
+    await emitAck(M, 'room:emote', { kind: 'nudge' }),
+    { ok: true, accepted: false },
+    '对方离线时 room:emote 返回 accepted:false'
+  );
+  eq(
+    M.log
+      .slice(markEmoteOpen)
+      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('催你啦'))
+      .length,
+    0,
+    '对方离线时不发送表情 notice'
+  );
+
+  // 重连后同一条表情可以正常送达（说明离线失败不消耗冷却）
+  const N2 = await connectClient('N2');
+  const markN2Join = N2.mark();
+  const rejoinN2 = asOk(
+    await emitAck(N2, 'room:join', { code: emoteCode, name: '表情乙', token: tokenN })
+  );
+  eq(rejoinN2.state.phase, 'submitting', 'B 重连后仍在提交阶段');
+  const markEmoteA = M.mark();
+  const markEmoteB = N2.mark();
+  eq(
+    await emitAck(M, 'room:emote', { kind: 'nudge' }),
+    { ok: true, accepted: true },
+    'A 发 nudge -> accepted:true'
+  );
+  const nudgeNotice = await waitEvent(
+    N2,
+    'room:notice',
+    (p) => Boolean(p) && p.text.includes('催你啦'),
+    { since: markEmoteB, timeout: 3000, hint: 'B 收到 nudge' }
+  );
+  eq(nudgeNotice, { kind: 'info', text: '表情甲 催你啦：快一点～' }, 'B 收到含发送者昵称的 info notice');
+  eq(
+    M.log
+      .slice(markEmoteA)
+      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('催你啦'))
+      .length,
+    0,
+    '发送者不回显自己的表情'
+  );
+
+  // 8s 冷却：立刻再发 -> accepted:false，且不产生新 notice
+  eq(
+    await emitAck(M, 'room:emote', { kind: 'thinking' }),
+    { ok: true, accepted: false },
+    '冷却中再发 -> accepted:false'
+  );
+  eq(
+    N2.log
+      .slice(markEmoteB)
+      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('还在想'))
+      .length,
+    0,
+    '冷却中不发送 notice'
+  );
+
+  // 非法 kind
+  const badEmote = asError(
+    await emitAck(M, 'room:emote', { kind: 'spam' as unknown as EmotePayload['kind'] })
+  );
+  eq(badEmote.error, 'INVALID_EMOTE', '未知 kind -> INVALID_EMOTE');
+  eq(badEmote.message, '快捷表情无效', 'INVALID_EMOTE 中文文案与协议一致');
+
+  // 清理表情房
+  eq((await emitAck(M, 'room:leave', {})).ok, true, '表情房 A 离开');
+  eq((await emitAck(N2, 'room:leave', {})).ok, true, '表情房 B 离开');
+  await sleep(200);
+  eq((await fetchJson('/health')).body.rooms, 0, '表情用例结束后房间已删除');
+  pass('快捷表情 room:emote');
+
+  // ---------- 11e. v3.4 未通关结束本局 game:end 协议级 ----------
+  step('11e. game:end：reveal 阶段未通关结束本局 -> 双方 won 视角 -> restart 正常 -> 非 active 相位拒绝');
+  const P = await connectClient('P');
+  const Q = await connectClient('Q');
+  const endCreate = asOk(await emitAck(P, 'room:create', { name: '结束甲' }));
+  const endCode = endCreate.code;
+  asOk(await emitAck(Q, 'room:join', { code: endCode, name: '结束乙' }));
+  const markEndReady = P.mark();
+  eq((await emitAck(P, 'player:ready', { ready: true })).ok, true, '结束局 A ready');
+  eq((await emitAck(Q, 'player:ready', { ready: true })).ok, true, '结束局 B ready');
+  await waitEvent(P, 'round:open', (p) => Boolean(p) && p.round === 1, {
+    since: markEndReady,
+    timeout: 6000,
+    hint: '结束局进入提交阶段',
+  });
+  eq((await emitAck(P, 'round:submit', { word: '夏天' })).ok, true, '结束局 A 提交');
+  const markEndReveal = Q.mark();
+  eq((await emitAck(Q, 'round:submit', { word: '冬天' })).ok, true, '结束局 B 提交不同词');
+  const endReveal = await waitEvent(Q, 'round:reveal', (p) => Boolean(p) && p.round === 1, {
+    since: markEndReveal,
+    timeout: 5000,
+  });
+  eq(endReveal.isWin, false, '结束局先进入非通关 reveal');
+
+  const markEndP = P.mark();
+  const markEndQ = Q.mark();
+  eq(await emitAck(P, 'game:end', {}), { ok: true }, 'reveal 阶段 game:end 返回 {ok:true}');
+  const endNotice = await waitEvent(
+    P,
+    'room:notice',
+    (p) => Boolean(p) && p.kind === 'system' && p.text.includes('本局已结束'),
+    { since: markEndP, timeout: 3000, hint: '结束本局的 system notice' }
+  );
+  eq(endNotice.text, '本局已结束，双方都可以查看战报并再来一局', '结束本局 notice 文案与协议一致');
+  const endWonP = await waitEvent(P, 'room:state', (s) => s.phase === 'won', {
+    since: markEndP,
+    timeout: 3000,
+  });
+  const endWonQ = await waitEvent(Q, 'room:state', (s) => s.phase === 'won', {
+    since: markEndQ,
+    timeout: 3000,
+  });
+  eq(endWonP.settlePending, true, 'A 进入结算视角（settlePending=true）');
+  eq(endWonQ.settlePending, true, 'B 进入结算视角（settlePending=true）');
+  eq(endWonP.result?.isWin, false, '结算 result.isWin=false');
+  eq(endWonP.result?.words, { a: '夏天', b: '冬天' }, '结算保留本轮两个词');
+  eq(endWonQ.result, endWonP.result, '双方看到同一份结算 result');
+  eq(endWonP.history.length, 1, '结算保留本轮 history');
+  eq(endWonP.history, endWonQ.history, '双方看到同一份 history');
+  eq(endWonP.deadline, null, '结算 deadline=null');
+  eq(
+    endWonP.players.map((p) => p.settleDismissed),
+    [false, false],
+    '冻结后双方都留在结算页（settleDismissed 全 false）'
+  );
+  eq(asError(await emitAck(Q, 'game:end', {})).error, 'BAD_PHASE', '重复 game:end -> BAD_PHASE（幂等拒绝）');
+
+  // restart 语义照常：先退出者 watching=true，后退出者 watching=false
+  const markEndRestartP = P.mark();
+  eq(
+    asOk(await emitAck(P, 'game:restart', {})).watching,
+    true,
+    'endGame 后 A 先退出：B 仍留守 -> watching=true'
+  );
+  const endLobbyP = await waitEvent(P, 'room:state', (s) => s.phase === 'lobby' && s.round === 1, {
+    since: markEndRestartP,
+    timeout: 3000,
+  });
+  eq(endLobbyP.history, [], 'restart 后看到真实 lobby history=[]');
+  eq(
+    asOk(await emitAck(Q, 'game:restart', {})).watching,
+    false,
+    'endGame 后 B 也退出 -> watching=false'
+  );
+  eq(asError(await emitAck(P, 'game:end', {})).error, 'BAD_PHASE', 'lobby 阶段 game:end -> BAD_PHASE');
+
+  // 在「真的通关」的 won 相位也不能 game:end
+  const markEndWonRound = P.mark();
+  eq((await emitAck(P, 'player:ready', { ready: true })).ok, true, '通关局 A ready');
+  eq((await emitAck(Q, 'player:ready', { ready: true })).ok, true, '通关局 B ready');
+  await waitEvent(P, 'round:open', (p) => Boolean(p) && p.round === 1, {
+    since: markEndWonRound,
+    timeout: 6000,
+    hint: '通关局进入提交阶段',
+  });
+  eq((await emitAck(P, 'round:submit', { word: '同步' })).ok, true, '通关局 A 提交');
+  eq((await emitAck(Q, 'round:submit', { word: '同步' })).ok, true, '通关局 B 提交同词');
+  await waitEvent(P, 'room:state', (s) => s.phase === 'won', {
+    since: markEndWonRound,
+    timeout: 4000,
+    hint: '同词 -> won',
+  });
+  eq(asError(await emitAck(P, 'game:end', {})).error, 'BAD_PHASE', 'won 阶段（已通关）game:end -> BAD_PHASE');
+
+  // 清理：双方 restart 回 lobby 后离开
+  eq(asOk(await emitAck(P, 'game:restart', {})).watching, true, '通关局 A 退出结算');
+  eq(asOk(await emitAck(Q, 'game:restart', {})).watching, false, '通关局 B 退出结算');
+  eq((await emitAck(P, 'room:leave', {})).ok, true, '结束局 A 离开');
+  eq((await emitAck(Q, 'room:leave', {})).ok, true, '结束局 B 离开');
+  await sleep(200);
+  eq((await fetchJson('/health')).body.rooms, 0, '结束本局用例结束后房间已删除');
+  pass('未通关结束本局 game:end');
+
   // ---------- 12. 超时自动提交（直接驱动状态机，不等待真实 60s） ----------
   step('12. 超时自动填「词穷」并正常判定');
   const gTimeout = new GameModule();
@@ -2404,6 +2624,190 @@ async function main(): Promise<void> {
   eq(gShut.roomCount(), 2, 'announceShutdown 只通知、不删除房间');
   gShut.shutdown();
   pass('announceShutdown 广播');
+
+  // ---------- 20. v3.4 endGame 直接驱动 ----------
+  step('20. endGame 直接驱动：submitting/reveal 冻结快照、双方 won 视角、重置与幂等');
+  const gEnd = new GameModule();
+  const endRoomCreated = asOk(gEnd.createRoom('end-a', { name: '甲' }));
+  gEnd.joinRoom('end-b', { code: endRoomCreated.code, name: '乙' });
+  const endRoom = gEnd.rooms.get(endRoomCreated.code) as Room;
+  const endRoomEvents: { event: string; payload: unknown }[] = [];
+  const endPlayerEvents: { seat: Seat; event: string; payload: unknown }[] = [];
+  gEnd.emitToRoom = (
+    _roomCode: string,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    endRoomEvents.push({ event, payload });
+  };
+  gEnd.emitToPlayer = (
+    player: Player,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    endPlayerEvents.push({ seat: player.seat, event, payload });
+  };
+  const endView = (seat: Seat): PublicRoomState => {
+    const found = endRoom.players.find((p) => p.seat === seat);
+    if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
+    return gEnd.getState(endRoom, found);
+  };
+
+  eq(asError(gEnd.endGame('end-a')).error, 'BAD_PHASE', 'lobby 阶段 endGame -> BAD_PHASE');
+  eq(asError(gEnd.endGame('ghost-socket')).error, 'NOT_IN_ROOM', '不在房间 endGame -> NOT_IN_ROOM');
+
+  // submitting：此刻还没有 result / history
+  endRoom.phase = 'submitting';
+  endRoom.deadline = Date.now() + 60000;
+  endRoom.submissions = { a: { word: '苹果', timedOut: false }, b: null };
+  gEnd._setTimer(endRoom, () => undefined, 60000);
+  eq(gEnd.endGame('end-a'), { ok: true }, 'submitting 阶段 endGame 成功');
+  eq(endRoom.phase, 'lobby', 'endGame 后内部 phase=lobby');
+  eq(endRoom.timer, null, 'endGame 清掉当前计时器');
+  eq(endRoom.deadline, null, 'endGame 后 deadline=null');
+  eq(endRoom.round, 1, 'endGame 后 round 重置为 1');
+  eq(endRoom.basis, null, 'endGame 后 basis=null');
+  eq(endRoom.submissions, { a: null, b: null }, 'endGame 后 submissions 清空');
+  eq(endRoom.agree, { a: false, b: false }, 'endGame 后 agree 清空');
+  eq(endRoom.result, null, 'endGame 后内部 result=null');
+  eq(endRoom.history, [], 'endGame 后内部 history=[]');
+  ok(endRoom.lastGame !== null, 'submitting 结束：留下 lastGame 快照');
+  eq(endRoom.lastGame?.result, null, 'submitting 结束：lastGame.result=null');
+  eq(endRoom.lastGame?.history, [], 'submitting 结束：lastGame.history 为空');
+  eq(endRoom.players.map((p) => p.settleDismissed), [false, false], '双方都留在结算页');
+  eq(endRoom.players.map((p) => p.ready), [false, false], 'ready 全部复位');
+  eq(
+    endRoomEvents.filter((entry) => entry.event === 'room:notice').map((entry) => entry.payload),
+    [{ kind: 'system', text: '本局已结束，双方都可以查看战报并再来一局' }],
+    '广播结束本局的 system notice'
+  );
+  const endSubViewA = endView('a');
+  const endSubViewB = endView('b');
+  eq(endSubViewA.phase, 'won', 'submitting 结束：A 看到 won 视角');
+  eq(endSubViewB.phase, 'won', 'submitting 结束：B 看到 won 视角');
+  eq(endSubViewA.settlePending, true, 'submitting 结束：settlePending=true');
+  eq(endSubViewA.deadline, null, 'won 视角 deadline=null');
+  eq(endSubViewA.result, null, 'submitting 结束的 won 视角 result=null');
+  eq(endSubViewA.history, [], 'submitting 结束的 won 视角 history=[]');
+  eq(endSubViewB.result, endSubViewA.result, 'A/B 看到同一份结算');
+  eq(asError(gEnd.endGame('end-b')).error, 'BAD_PHASE', '重复 endGame -> BAD_PHASE（幂等）');
+
+  // reveal：冻结非通关 result + 本轮 history
+  endRoom.phase = 'reveal';
+  endRoom.round = 2;
+  endRoom.basis = { a: '云', b: '雾' };
+  endRoom.result = {
+    round: 2,
+    words: { a: '苹果', b: '云朵' },
+    isWin: false,
+    timedOut: { a: false, b: true },
+    agree: { a: false, b: false },
+    winBy: null,
+  };
+  endRoom.history.push({
+    round: 2,
+    basis: { a: '云', b: '雾' },
+    words: { a: '苹果', b: '云朵' },
+    isWin: false,
+    agree: { a: false, b: false },
+    winBy: null,
+  });
+  endRoom.deadline = null;
+  eq(gEnd.endGame('end-b'), { ok: true }, 'reveal 阶段 endGame 成功');
+  const frozenLastGame = endRoom.lastGame;
+  if (!frozenLastGame) throw new Error('断言失败：reveal 结束后应存在 lastGame 快照');
+  eq(frozenLastGame.round, 2, '快照 round 为结束时的轮次');
+  eq(frozenLastGame.basis, { a: '云', b: '雾' }, '快照 basis 保留');
+  eq(
+    frozenLastGame.result,
+    {
+      round: 2,
+      words: { a: '苹果', b: '云朵' },
+      isWin: false,
+      timedOut: { a: false, b: true },
+      agree: { a: false, b: false },
+      winBy: null,
+    },
+    'reveal 结束：lastGame.result 是非通关 Result 且保留 words'
+  );
+  eq(frozenLastGame.result?.isWin, false, '快照 result.isWin=false');
+  eq(frozenLastGame.history.length, 1, '快照 history 保留本轮');
+  eq(frozenLastGame.history[0].words, { a: '苹果', b: '云朵' }, '快照 history 词保留');
+  eq(endRoom.phase, 'lobby', 'reveal 结束后内部回到 lobby');
+  eq(endRoom.result, null, '冻结后内部 result 清空');
+  eq(endRoom.history, [], '冻结后内部 history 清空');
+  const endRevViewA = endView('a');
+  eq(endRevViewA.phase, 'won', 'reveal 结束：A 看到 won 视角');
+  eq(endRevViewA.result?.words, { a: '苹果', b: '云朵' }, 'won 视角 result 来自快照');
+  eq(endRevViewA.result?.isWin, false, 'won 视角判定为未通关');
+  eq(endRevViewA.history.length, 1, 'won 视角 history 来自快照');
+  eq(endView('b').result, endRevViewA.result, 'A/B 看到同一份结算 result');
+  ok(
+    endPlayerEvents.filter((entry) => entry.event === 'room:state').length > 0,
+    'endGame 之后广播了 room:state'
+  );
+  gEnd.shutdown();
+  pass('endGame 直接驱动');
+
+  // ---------- 21. v3.4 emote 直接驱动 ----------
+  step('21. emote 直接驱动：三种预设文案、只发对方、冷却与无对手 / 离线');
+  const gEmote = new GameModule();
+  const emoteRoomCreated = asOk(gEmote.createRoom('em-a', { name: '甲' }));
+  gEmote.joinRoom('em-b', { code: emoteRoomCreated.code, name: '乙' });
+  const emoteRoom = gEmote.rooms.get(emoteRoomCreated.code) as Room;
+  const emoteNotices: { seat: Seat; payload: NoticePayload }[] = [];
+  gEmote.emitToPlayer = (
+    player: Player,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    if (event === 'room:notice') {
+      emoteNotices.push({ seat: player.seat, payload: payload as NoticePayload });
+    }
+  };
+  const emotePlayerOf = (seat: Seat): Player => {
+    const found = emoteRoom.players.find((p) => p.seat === seat);
+    if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
+    return found;
+  };
+  const emoteA = emotePlayerOf('a');
+
+  eq(asError(gEmote.emote('em-a', 'nudge')).error, 'BAD_PHASE', 'lobby 阶段 emote -> BAD_PHASE');
+  eq(asError(gEmote.emote('ghost-socket', 'nudge')).error, 'NOT_IN_ROOM', '不在房间 emote -> NOT_IN_ROOM');
+  emoteRoom.phase = 'submitting';
+  eq(asError(gEmote.emote('em-a', 'spam')).error, 'INVALID_EMOTE', '未知 kind -> INVALID_EMOTE');
+  eq(asError(gEmote.emote('em-a', undefined)).error, 'INVALID_EMOTE', '缺省 kind -> INVALID_EMOTE');
+  eq(asError(gEmote.emote('em-a', 123)).error, 'INVALID_EMOTE', '非字符串 kind -> INVALID_EMOTE');
+
+  eq(gEmote.emote('em-a', 'nudge'), { ok: true, accepted: true }, 'nudge 送达');
+  eq(
+    emoteNotices.at(-1),
+    { seat: 'b', payload: { kind: 'info', text: '甲 催你啦：快一点～' } },
+    'nudge 文案与目标座位正确'
+  );
+  eq(gEmote.emote('em-a', 'thinking'), { ok: true, accepted: false }, '冷却中不送达');
+  emoteA.lastEmoteAt = Date.now() - constants.EMOTE_COOLDOWN_MS - 1;
+  eq(gEmote.emote('em-a', 'thinking'), { ok: true, accepted: true }, '冷却结束可送达');
+  eq(emoteNotices.at(-1)?.payload.text, '甲 说：还在想，别急～', 'thinking 文案');
+  emoteA.lastEmoteAt = null;
+  eq(gEmote.emote('em-a', 'cheer'), { ok: true, accepted: true }, 'cheer 送达');
+  eq(emoteNotices.at(-1)?.payload.text, '甲 给你加油：稳住！', 'cheer 文案');
+  eq(emoteNotices.map((entry) => entry.seat), ['b', 'b', 'b'], '表情只发给对方，发送者不回显');
+
+  // 对方离线：不送达、不发送，也不消耗冷却
+  gEmote.disconnect('em-b');
+  const noticesBeforeOffline = emoteNotices.length;
+  emoteA.lastEmoteAt = null;
+  eq(gEmote.emote('em-a', 'nudge'), { ok: true, accepted: false }, '对方离线 -> accepted:false');
+  eq(emoteNotices.length, noticesBeforeOffline, '对方离线时不发送 notice');
+
+  // 单人房（没有对手）
+  const soloCreated = asOk(gEmote.createRoom('em-solo', { name: '丙' }));
+  const soloRoom = gEmote.rooms.get(soloCreated.code) as Room;
+  soloRoom.phase = 'submitting';
+  eq(gEmote.emote('em-solo', 'nudge'), { ok: true, accepted: false }, '没有对手 -> accepted:false');
+  gEmote.shutdown();
+  pass('emote 直接驱动');
 }
 
 /* ==================== 执行 ==================== */

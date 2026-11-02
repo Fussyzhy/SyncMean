@@ -1,6 +1,12 @@
-# 同声传意 · 联机版 —— 协议契约 v3.3（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3.4（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3.4 变更（相对 v3.3）**：新增两个客户端事件，其余下发字段零变化：
+> 1. **快捷表情 `room:emote`**：仅 `submitting` 阶段可用，只允许预设白名单 `nudge` / `thinking` / `cheer`（**不接受自由文本**，避免变成双盲暗示通道）。服务端按 8s 冷却限流，把预设文案以 `room:notice {kind:'info'}` 定向发给对方；ack 返回 `{ok:true, accepted:boolean}`（冷却/对方离线时 `accepted:false`）。新增错误码 `INVALID_EMOTE`。
+> 2. **未通关也能「结束本局」`game:end`**：`countdown` / `submitting` / `reveal` 阶段任一玩家可结束本局；服务端把当前对局冻结进 `lastGame` 快照（`result` 可为 `null`，表示还没揭晓），房间内部回 `lobby`，**双方都看到「本局结束」结算页**，可导出战报/再来一局。再次调用返回 `BAD_PHASE`。
+> 3. **再来一局自动准备（纯前端）**：点过 `game:restart` 的一方，在对方也退出结算页（`settlePending` 变 false）后自动发 `player:ready`，双方都回来即自动开局。协议无变化。
+> 4. **DOM**：新增 `#btn-end`、`#emote-row`、`#btn-emote-nudge` / `#btn-emote-thinking` / `#btn-emote-cheer`。
 >
 > **v3.3 变更（相对 v3.2）**：**协议事件与下发字段零变化**，只补可靠性、运维与 DOM 要求：
 > 1. **离线兜底（关键）**：主动对局（countdown / submitting / reveal）中一方断线超过 `OFFLINE_ABORT_GRACE_MS = 120000`，服务端自动中止对局（`phase='aborted'`，在线方收到 `room:error {code:'OPPONENT_LEFT'}`）。解决「不限时房间对方掉线后永久卡在 submitting」。
@@ -37,6 +43,7 @@
 - 两个词不同 → 以【本轮两个词】为联想依据进入下一轮。
 - **v3.2**：填词时限由房主创建房间时选定（不限时 / 1 分钟 / 3 分钟 / 5 分钟），整局固定。
 - **v3.2**：揭晓后**不自动推进**，双方看完后点「进入下一轮」继续（不再有 4.5 秒自动跳转）。
+- **v3.4**：提交后等待对方时可用**预设快捷表情**（催一下 / 还在想 / 加油），服务端 8s 限流；对局中任一玩家可随时「结束本局」，双方都进结算页并可导出战报；点过「再来一局」的人会在对方也退出结算后**自动准备**。
 - **v2**：揭晓后若双方都确认「这两个词算同意词」→ 同样通关（`winBy: 'agree'`）。判定权在玩家，服务器不做任何语义判断。
 - 整局通关后进入**结算视图**，展示最终成功的词与逐轮词语，支持导出一张整局词语列表图片。
 - 房间 4 位码，昵称进入，无需注册/登录。只有「普通模式」。本地运行，单端口。
@@ -98,6 +105,7 @@ const SUBMIT_LIMIT_OPTIONS = [0, 60000, 180000, 300000]; // 0=不限时，其余
 const START_DELAY        = 300;   // 双方准备后稍等再倒计时
 const SETTLE_OFFLINE_GRACE_MS = 60000;  // v3.3：留守结算页的人离线多久后视为已退出
 const OFFLINE_ABORT_GRACE_MS  = 120000; // v3.3：主动对局中一方离线多久后中止对局
+const EMOTE_COOLDOWN_MS       = 8000;   // v3.4：快捷表情每人冷却
 ```
 
 **v3.2 规则**：
@@ -130,8 +138,8 @@ Room {
   timer: Timeout|null,     // 当前阶段唯一计时器
   createdAt: number
 }
-Snapshot { round, basis:{a,b}|null, history:[HistoryItem], result:Result, endedAt:number }
-Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean, offlineAt:number|null } // v3.3：offlineAt 仅内部使用，用于离线兜底判定
+Snapshot { round, basis:{a,b}|null, history:[HistoryItem], result:Result|null, endedAt:number } // v3.4：result 可为 null（未揭晓时结束本局）
+Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean, offlineAt:number|null, lastEmoteAt:number|null } // v3.3：offlineAt 仅内部；v3.4：lastEmoteAt 用于表情冷却
 Result  { round, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy:'same'|'agree'|null }
 HistoryItem { round, basis:{a,b}|null, words:{a,b}, isWin, agree:{a,b}, winBy:'same'|'agree'|null }
 ```
@@ -157,7 +165,9 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 | `round:submit` | `{word:string}` | `{ok:true, submitted:true}` | 仅 submitting 阶段；**不得**在返回或广播里泄露对方已提交的内容 |
 | `round:agree` | `{agree:boolean}` | `{ok:true, agree:{a,b}, winBy:'agree'\|null}` | **v2**。仅 reveal 阶段有效。为本人投/撤「这两个词算同意词」。`agree` 缺省视为 `true`。两票齐 → 立即通关（`winBy:'agree'`）。幂等：重复投同一方向不报错 |
 | `round:next` | `{}` | `{ok:true}` | reveal 阶段：进入下一轮。v3.2 起**这是离开 reveal 的唯一方式**（不再自动推进） |
-| `game:restart` | `{}` | `{ok:true, watching:boolean}` | won 阶段：**本人**退出结算页回到 lobby（round=1, basis=null, history=[], ready 全 false, result=null, agree 全 false；`submitLimitMs` 保持不变）。若对方还留在结算页，服务端把整局冻结成 `lastGame` 快照继续为 TA 呈现 won 视角（见 §5.3.1）。对方也已退出时 `lastGame` 才置 null。 |
+| `room:emote` | `{kind:'nudge'\|'thinking'\|'cheer'}` | `{ok:true, accepted:boolean}` | **v3.4**。仅 `submitting` 阶段有效（否则 `BAD_PHASE`）；`kind` 必须在 `EMOTE_KINDS` 内（否则 `INVALID_EMOTE`）。服务端按 `EMOTE_COOLDOWN_MS=8000` 限流；对方离线或冷却中 `accepted:false`（不发送）。成功时向对方定向发 `room:notice {kind:'info', text}`，文案由服务端生成（含发送者昵称），**不接受自由文本**。发送者不回显 |
+| `game:end` | `{}` | `{ok:true}` | **v3.4**。仅 `countdown` / `submitting` / `reveal` 阶段有效（否则 `BAD_PHASE`）。把当前对局冻结进 `lastGame`（未揭晓时 `result=null`）并把房间内部重置为 `lobby`；**双方都保持 `settleDismissed=false`**，因此两人都会进入「本局结束」结算页（`phase:'won'` 视角）。随后可用 `game:restart` 各自退出并再来一局。幂等：内部已是 lobby 时再调 → `BAD_PHASE` |
+| `game:restart` | `{}` | `{ok:true, watching:boolean}` | won 阶段：**本人**退出结算页回到 lobby（round=1, basis=null, history=[], ready 全 false, result=null, agree 全 false；`submitLimitMs` 保持不变）。若对方还留在结算页，服务端把整局冻结成 `lastGame` 快照继续为 TA 呈现 won 视角（见 §5.3.1）。对方也已退出时 `lastGame` 才置 null。**v3.4**：前端在本人点过 restart 后，等对方也退出结算页会自动发 `player:ready` |
 
 `room:join` 规则优先级：
 1. `token` 命中房间内已有玩家 → 重连（新 socketId 顶替旧的，旧连接收到 `room:error {code:'REPLACED'}` 并被移出房间频道）。
@@ -180,6 +190,22 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 - 双方都是 `true` 之后不允许再撤（已 `won`，返回 `BAD_PHASE`）。
 - 超时自动填的「词穷」同样可以投同意词票（判定权在玩家）。
 
+`room:emote` 细则（v3.4）：
+- 仅 `phase === 'submitting'` 允许，否则 `BAD_PHASE`；不在房间 `NOT_IN_ROOM`。
+- `kind` 只接受 `EMOTE_KINDS = ['nudge','thinking','cheer']`，其它值（含自由文本、超长字符串）一律 `INVALID_EMOTE`。
+- 冷却：同一玩家两次成功发送之间至少间隔 `EMOTE_COOLDOWN_MS`（8s）；冷却中返回 `{ok:true, accepted:false}`（不是错误，前端提示「别催太急」）。
+- 对方不存在或 `connected===false` → `{ok:true, accepted:false}`，不发送。
+- 成功：向**对方**定向发 `room:notice {kind:'info', text}`，文案预设（含发送者昵称）：
+  `nudge` → `${name} 催你啦：快一点～`、`thinking` → `${name} 说：还在想，别急～`、`cheer` → `${name} 给你加油：稳住！`。发送者不回显（前端本地 toast）。
+- **硬约束**：绝不支持自由文本/自定义表情——双盲阶段任何文字都可能暗示自己的词，破坏公平。
+
+`game:end` 细则（v3.4）：
+- 仅 `countdown` / `submitting` / `reveal` 允许，否则 `BAD_PHASE`；不在房间 `NOT_IN_ROOM`。
+- 执行顺序：`_clearTimer` → 冻结 `lastGame = { round, basis, history, result: 公开后的当前 result（未揭晓时为 null）, endedAt }` → 房间内部重置为 `lobby`（`round=1`、`basis=null`、`submissions/agree/result/history` 清空、`deadline=null`、所有 `players.ready=false`）→ **所有玩家 `settleDismissed` 保持 `false`** → 广播 `room:notice {kind:'system', text:'本局已结束，双方都可以查看战报并再来一局'}` → `room:state`。
+- 因为 `lastGame && !settleDismissed`，双方 `getState` 都得到 won 视角，渲染同一个「本局结束」结算页（标题由 `winBy=null` 推导为「本局结束」，可能出现空的逐轮列表——第 1 轮还没揭晓就结束是正常的）。
+- 结束后的退出/再来一局完全复用 §5.3.1 的各自退出机制。
+- 幂等：内部已是 `lobby` 后再调 `game:end` → `BAD_PHASE`。
+
 ### 5.2 服务端 → 客户端（都发到房间频道）
 
 | 事件 | 载荷 | 触发时机 |
@@ -189,7 +215,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 | `round:open` | `{round, basis, deadline}` | 倒计时结束、输入开放；`deadline = 服务端 now + submitLimitMs`（本房间不限时则为 `null`，无超时计时器） |
 | `round:opponent-submitted` | `{}` | 对方已提交（仅提示，不含文字） |
 | `round:reveal` | `{round, basis, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy, history}` | 双方都提交（或计时房间到点自动提交）后，**同时**揭晓。此刻 `agree` 必为 `{a:false,b:false}`、`winBy` 为 `'same'` 或 `null`。v3.2 起揭晓后不自动推进 |
-| `room:notice` | `{text:string, kind:'join'\|'leave'\|'info'\|'system'}` | 有人进出、同意词通关等提示，前端做 toast |
+| `room:notice` | `{text:string, kind:'join'\|'leave'\|'info'\|'system'}` | 有人进出、同意词通关、快捷表情（v3.4，定向给接收方）、本局结束（v3.4）等提示，前端做 toast |
 | `room:error` | `{code, message}` | 会话级错误（`OPPONENT_LEFT`、`REPLACED`、`ROOM_DELETED`） |
 
 ### 5.3 PublicRoomState（前端渲染的唯一依据）
@@ -221,6 +247,8 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 
 `deadline` 语义：countdown = 倒计时结束时刻；submitting = 提交截止（**不限时房间为 `null`**）；reveal = **恒为 `null`**（v3.2 起揭晓后不自动推进）；won / lobby / aborted 恒为 `null`。
 
+`state.phase === 'won'` 且 `settlePending === true` 有两种来源：正常通关，或 v3.4 的「结束本局」。后者 `result` 为冻结时的非通关结果，或为 `null`（在 countdown/submitting 阶段就结束）；前端结算页/导出图必须能处理 `result=null` 与空历史（标题显示「本局结束」）。
+
 `agree` 视角说明：`agree.you` 是本人本轮投票，`agree.opponent` 是对方是否已投票。**绝不**因为对方投了票就泄露任何文字内容（此阶段词本来就已公开，无额外风险）。
 
 **v2 已确认语义（Lead 裁定）**：reveal 期间 `result.agree` 实时镜像当前票面（例如 A 投了就是 `{a:true,b:false}`），但 `result.isWin` / `result.winBy` 在两票齐之前**不变**（仍是 `false` / `null`）；两票齐后才是 `{a:true,b:true}` + `isWin:true` + `winBy:'agree'`。前端渲染投票区应以 `state.agree.{you,opponent}` 为准，`result.agree` 只是同一事实的座位视角副本，可用于结算与导出图。
@@ -233,12 +261,13 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 
 实现口径（服务端负责，前端几乎不改）：
 
-- Room 新增 `lastGame: Snapshot | null`，`Snapshot = { round, basis, history, result, endedAt }`（`history`/`result` 形状与 §5.3 完全一致，前端结算/导出可直接复用）。
+- Room 新增 `lastGame: Snapshot | null`，`Snapshot = { round, basis, history, result, endedAt }`（`history`/`result` 形状与 §5.3 完全一致，前端结算/导出可直接复用；**v3.4 起 `result` 可为 `null`**——在未揭晓阶段结束本局时没有当前轮结果）。
 - Player 新增 `settleDismissed: boolean`（本玩家是否已退出结算页）。存在玩家对象上，所以**断线重连后仍保持**在结算页。
 - `game:restart` 语义变为「我退出结算页」：
   1. 首次有人退出（内部 `phase==='won'`）：先把整局冻结进 `lastGame`，再把房间内部重置为 `lobby`（`round=1`、`basis=null`、`submissions/agree/result/history` 清空、`deadline=null`、所有 `ready=false`——与旧行为相同），并置**点击者** `settleDismissed=true`、其余人 `false`。
   2. 后续有人退出（内部已是 `lobby`）：只把自己 `settleDismissed=true`；当**房间内所有玩家**都已退出 → `lastGame=null`。
 - **v3.3 离线解锁（关键）**：留守结算页的玩家（`settleDismissed===false`）断线超过 `SETTLE_OFFLINE_GRACE_MS`（60s）后，`sweep()` 自动把它当作已退出：置 `settleDismissed=true`；若所有玩家都已退出则 `lastGame=null`；仍在线的人收到系统 notice「对方离线太久，已自动退出结算页」。这样已点「再来一局」的人不会被关页面走人的对方永久锁在准备页。离线者重连后看到真实 lobby（不再回到结算页）。
+- **v3.4 结束本局复用同一机制**：`game:end` 冻结快照后让所有人保持 `settleDismissed=false`，因此双方同时进入结算页；之后各自 `game:restart` 退出，与通关后的流程完全一致（含离线解锁兜底）。
 - **视角门控（关键）**：`getState(room, player)` 里，若 `room.lastGame && !player.settleDismissed`，则该玩家看到的 state 为「won 视角」：`phase:'won'`、`round/basis/history/result` 全部取自 `lastGame`、`deadline:null`、`submitted` 与 `agree` 全 false（`submitLimitMs` 仍下发房间真实值）。已退出的人看到真实房间状态。因此前端**仍然只按 `state.phase` 决定渲染哪一屏**，不需要新增分支。
 - 因为看到 `phase:'won'`，未退出的人自然点不到「准备」；服务端还必须**硬拒**：`player:ready` 对「`lastGame` 存在且本人 `settleDismissed===false`」的玩家返回 `BAD_PHASE`（防止陈旧或被改过的前端绕过）。
 - 对局不可能在有人还在看结算时开始：`_scheduleStart` 需要两人都 ready，而未退出者无法 ready；另外 `_startCountdown` 强制 `lastGame=null` 且所有人 `settleDismissed=false`（兜底）。
@@ -258,7 +287,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 
 ### 5.4 错误码
 
-`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `INVALID_SUBMIT_LIMIT`(填词时限不在 `SUBMIT_LIMIT_OPTIONS` 内) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
+`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `INVALID_SUBMIT_LIMIT`(填词时限不在 `SUBMIT_LIMIT_OPTIONS` 内) `INVALID_EMOTE`(表情不在 `EMOTE_KINDS` 内) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
 
 `message` 一律中文，可直接展示给玩家。同意词相关的所有拒绝都用 `BAD_PHASE`，不新增错误码。
 
@@ -287,8 +316,10 @@ submitting --(两人都提交 / 计时房间到点自动填「词穷」)--> [判
    └─ 不同     --> reveal（v3.2：deadline=null、无计时器，无限等待）
 reveal --(round:next，任一玩家)--> countdown(下一轮) 立即
 reveal --(双方都 round:agree=true)--> won（winBy='agree'，更新 history 末项，room:notice）
+countdown|submitting|reveal --(game:end，任一玩家)--> won 视角（v3.4：冻结 lastGame，双方都进结算页；内部 phase=lobby）
 won --(game:restart)--> lobby（清空 history/result/ready/agree；submitLimitMs 保留；整局冻结进 lastGame 供未退出者继续看）
 won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但留守者仍看到 won 视角（§5.3.1）
+lobby --(双方都 restart 后，前端自动 player:ready)--> 双方 ready → 自动开局（v3.4，纯前端行为）
 ```
 
 - 进入下一轮时：`round += 1`，`basis = 本轮 words`，清空 submissions，`agree = {a:false,b:false}`，`phase='countdown'`。
@@ -332,6 +363,16 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 #waiting-hint         等待提示（文案含「已提交，等对方 · 已等 m:ss」，对方离线时追加「 · 对方离线」）
 #btn-copy-waiting     等待且对方离线时出现的「复制邀请链接，喊他回来」按钮
 #opponent-offline     对局视图中对方掉线时的提示横幅（role=status、aria-live=polite；对方重连后消失）
+```
+
+**v3.4 新增（快捷表情与结束本局）**：
+
+```
+#emote-row            对局视图中 submitting 阶段且对方在线时出现的快捷表情行
+#btn-emote-nudge      「催一下」按钮（class 含 emote-btn；冷却中 disabled）
+#btn-emote-thinking   「还在想」按钮
+#btn-emote-cheer      「加油」按钮
+#btn-end              对局 topbar 中的「结束本局」按钮（v-if 相位为 countdown/submitting/reveal；二次确认时文案为「确认结束？」）
 ```
 
 **v2 新增（同意词投票）**，位于对局视图的揭晓面板内：
@@ -380,10 +421,11 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
-11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit / #opponent-offline / #btn-copy-waiting 这些 DOM id 必须存在。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit / #opponent-offline / #btn-copy-waiting / #btn-end / #emote-row 这些 DOM id 必须存在。
 12. **明暗模式（v3.1）**：无存储时跟随系统 `prefers-color-scheme`；系统能力不可用（无 `matchMedia`）时**兜底明亮**；`#btn-theme` 单击切换并把 `321:theme` 写入 localStorage，刷新后保持；Shift+单击清除存储回到「跟随系统」；深浅两套主题的 `body` 背景色不同、正文与按钮文字对比度 ≥ 4.5:1；`<html data-theme>`、`data-theme-source` 与 `<meta name="theme-color">` 同步更新。
 13. **填词时限（v3.2）**：`yarn test` 断言——默认创建（不传 `submitLimitMs`）时 `state.submitLimitMs===60000` 且 `round:open.deadline ≈ now+60000`；创建传 `180000` 时 `state.submitLimitMs===180000`、`round:open.deadline-now ∈ [170000,182000]`；非法值（如 `90000`、字符串）返回 `INVALID_SUBMIT_LIMIT`；传 `0` 时 `round:open.deadline===null`、等待一段时间仍停在 `submitting` 且不自动揭晓、双方提交后正常 `round:reveal`；`game:restart` 后新 lobby 的 `state.submitLimitMs` 与建房时一致。浏览器验收需覆盖：首页可选四种时限、房间页 `#room-limit` 显示正确、不限时房间 `#timer` 显示「不限时」且无进度条、揭晓后无自动跳转（停留超过原 4.5s 仍在 reveal，`#btn-next` 可手动进入下一轮）。
 14. **离线兜底（v3.3）**：`yarn test` 断言——`disconnect` 后记录 `offlineAt`、带 token 重连后清空；`offlineAt` 回拨超过 `OFFLINE_ABORT_GRACE_MS` 后 `sweep()` → `phase='aborted'`、`deadline=null`、在线方收到 `room:error{code:'OPPONENT_LEFT'}`（未超时则相位不变）；A `game:restart` 后 B 断线、B 的 `offlineAt` 回拨超过 `SETTLE_OFFLINE_GRACE_MS` → `sweep()` 后 `B.settleDismissed=true`、`lastGame=null`、A 的 `player:ready` 成功（未超时仍被拒）；`Game.announceShutdown()` 对每个房间广播 `room:notice`。HTTP：`/health` 响应含 CSP（`default-src 'self'`）、`x-content-type-options: nosniff`、`referrer-policy: no-referrer`；生产构建下 `/assets/*` 的 `Cache-Control` 同时含 `immutable` 与 `max-age=31536000`。浏览器验收：提交后等待提示包含「等对方」与「已等 m:ss」；对手掉线后对局页出现 `#opponent-offline`。
+15. **快捷表情与结束本局（v3.4）**：`yarn test` 断言——`room:emote` 在 submitting 阶段成功返回 `accepted:true` 且对方收到含昵称与「催你啦」的 `room:notice`；8s 内第二次 `accepted:false`；非法 `kind` 返回 `INVALID_EMOTE`；非 submitting 阶段返回 `BAD_PHASE`；对方离线返回 `accepted:false`。`game:end` 在 reveal 阶段成功后双方 state 变为 `phase='won'`、`settlePending=true`、`result.isWin=false`、history 保留；内部 `lastGame.result` 在未揭晓阶段结束时为 `null`；lobby/won 阶段调用返回 `BAD_PHASE`。浏览器验收：A 提交后点 `#btn-emote-nudge`，B 端 toast 出现「催你啦」；对局中 `#btn-end` 点两次（二次确认）后双方进入 `#view-settle` 且 `#settle-title` 为「本局结束」；随后双方各点 `#btn-restart`，**无需再点准备**即自动进入下一局倒计时（自动准备）。
 
 ## 11. 导出图片契约（纯前端）
 
@@ -400,7 +442,7 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 - 任何进入 loading 的按钮，**必须在渲染阶段按当前真实忙态重新赋值**（`classList.toggle('is-busy', busy)`，Vue 里就是在组件渲染期 / computed / watch 里按 ref 重刷），不能只依赖请求回调去移除。
 - 理由：ack 回调到达时服务端可能已广播了新 phase，渲染走了别的分支，`is-busy` 就永久残留；而 CSS 里 `.btn.is-busy { color: transparent }` 会让按钮「没有文字 + 一直转圈」。
 - 因此：房间视图必须显式清/设 `#btn-ready` 的 `is-busy` 与 `aria-busy`；对局面板必须对 `#btn-submit` 同理；回到 lobby、离开房间、`aborted`、重开、断线重连这几条路径都要把各自按钮的 loading 态归位。
-- 新加的 `#btn-agree` / `#btn-export` / `#btn-next` / `#btn-restart` / `#btn-theme` 也必须遵守同一条规则。
+- 新加的 `#btn-agree` / `#btn-export` / `#btn-next` / `#btn-restart` / `#btn-theme` / `#btn-end` 也必须遵守同一条规则；`#btn-emote-*` 冷却用原生 `disabled` 表示，不进 loading 态。
 
 ## 13. 明暗主题契约（v3.1）
 

@@ -10,10 +10,11 @@
  * 单例：整个应用只有一个会话（同一页面只有一个 socket / 一份房间状态）。
  */
 
-import { computed, reactive, ref } from 'vue';
-import { DEFAULT_SUBMIT_MS, SUBMIT_LIMIT_OPTIONS } from '@shared/protocol';
+import { computed, reactive, ref, watch } from 'vue';
+import { DEFAULT_SUBMIT_MS, EMOTE_KINDS, SUBMIT_LIMIT_OPTIONS } from '@shared/protocol';
 import type {
   AgreePair,
+  EmoteKind,
   PublicPlayer,
   PublicRoomState,
   Result,
@@ -74,6 +75,13 @@ function submitLimitLabel(ms: number): string {
   return seconds < 60 ? seconds + ' 秒' : Math.round(seconds / 60) + ' 分钟';
 }
 
+/** v3.4 快捷表情的白名单文案（只允许预设值，服务端会再校验一次） */
+const EMOTE_LABELS: Record<EmoteKind, { label: string; emoji: string }> = {
+  nudge: { label: '催一下', emoji: '⏰' },
+  thinking: { label: '还在想', emoji: '🤔' },
+  cheer: { label: '加油', emoji: '💪' },
+};
+
 /** v2.1 §5.3.1：对方还留在结算页时，准备页的统一提示（tip 与按钮 tooltip 共用同一句） */
 const SETTLE_WATCH_TIP = '对方还在看上一局的结算，等你俩都点『再来一局』才能开始～';
 
@@ -109,6 +117,13 @@ interface SubmitLimitOption {
   ms: SubmitLimitMs;
   label: string;
   active: boolean;
+}
+
+interface EmoteOption {
+  kind: EmoteKind;
+  label: string;
+  emoji: string;
+  disabled: boolean;
 }
 
 function otherSeat(seat: Seat): Seat {
@@ -155,6 +170,12 @@ function createGameSession() {
   const revealTick = ref(0);
   const now = ref(Date.now());
   const joinFocusTick = ref(0);
+  /** v3.4 快捷表情冷却截止时刻（ms）：8s 内所有表情按钮置灰 */
+  const emoteCooldownUntil = ref(0);
+  /** 「结束本局」二次确认截止时刻（ms）：now < 它时按钮处于确认态 */
+  const endConfirmUntil = ref(0);
+  /** 点过「再来一局」后，等对方也退出结算页再自动准备 */
+  const autoReadyPending = ref(false);
 
   const copySupported = exportCapability().copy;
 
@@ -345,6 +366,26 @@ function createGameSession() {
   const opponentHintOn = computed(
     () => opened.value && !showReveal.value && !submittedYou.value && opponentDone.value,
   );
+
+  /** v3.4 快捷表情选项（等待对方时可用；冷却中全部置灰） */
+  const emoteOptions = computed<EmoteOption[]>(() =>
+    EMOTE_KINDS.map((kind) => ({
+      kind,
+      label: EMOTE_LABELS[kind].label,
+      emoji: EMOTE_LABELS[kind].emoji,
+      disabled: now.value < emoteCooldownUntil.value,
+    })),
+  );
+  /** 只在「输入已开放、还没揭晓、对方在线」时展示表情条 */
+  const emoteVisible = computed(
+    () => opened.value && !showReveal.value && opponentConnected.value,
+  );
+
+  /** v3.4「结束本局」：对局中任意相位可点（won / lobby 不可） */
+  const endAvailable = computed(
+    () => phase.value === 'countdown' || phase.value === 'submitting' || phase.value === 'reveal',
+  );
+  const endConfirmPending = computed(() => now.value < endConfirmUntil.value);
 
   const submitRemain = computed(() => {
     const total = roomSubmitLimitMs.value;
@@ -539,12 +580,14 @@ function createGameSession() {
     if (revealRound !== round) {
       revealRound = round;
       revealTick.value += 1;
-      if (!res.isWin) sound.reveal();
+      // v3.4：未通关「结束本局」也会进入 won 视角，进结算页时不该再播揭晓音
+      if (!res.isWin && st.phase !== 'won') sound.reveal();
     }
-    if (st.phase === 'won' && winRound !== round) {
+    // v3.4：只有真正通关（isWin）才撒花/播胜利音；「结束本局」的非通关快照不庆祝
+    if (st.phase === 'won' && res.isWin && winRound !== round) {
       winRound = round;
       confetti.celebrate();
-      if (res.isWin) sound.win();
+      sound.win();
     }
   }
 
@@ -563,6 +606,7 @@ function createGameSession() {
       localSubmitted.value = false;
       opponentSubmitted.value = false;
       submittedAt.value = 0;
+      endConfirmUntil.value = 0;
       lastReveal.value = null;
       revealRound = 0;
       winRound = 0;
@@ -583,6 +627,7 @@ function createGameSession() {
       localSubmitted.value = false;
       opponentSubmitted.value = false;
       submittedAt.value = 0;
+      endConfirmUntil.value = 0;
       lastReveal.value = null;
       revealRound = 0;
       winRound = 0;
@@ -618,6 +663,8 @@ function createGameSession() {
     localSubmitted.value = false;
     opponentSubmitted.value = false;
     submittedAt.value = 0;
+    endConfirmUntil.value = 0;
+    autoReadyPending.value = false;
     lastRound = 0;
     lastReveal.value = null;
     revealRound = 0;
@@ -775,6 +822,26 @@ function createGameSession() {
     });
   }
 
+  /* ---------------- 用户动作：再来一局自动准备 ---------------- */
+
+  /**
+   * v3.4 纯前端自动准备：点过「再来一局」后，等对方也退出结算页（watchingSettle=false），
+   * 自己还没准备就自动发 player:ready；协议无变化。
+   */
+  function maybeAutoReady(): void {
+    if (!autoReadyPending.value) return;
+    const st = state.value;
+    if (!st || st.phase !== 'lobby' || watchingSettle.value) return;
+    autoReadyPending.value = false;
+    if (me.value && me.value.ready) return;
+    onReady();
+  }
+
+  // 对方退出结算页（watchingSettle true → false）后触发自动准备
+  watch(watchingSettle, () => {
+    maybeAutoReady();
+  });
+
   /** 返回 false 表示没有发起提交（空词等），调用方可以把焦点放回输入框 */
   function submitWord(): boolean {
     const st = state.value;
@@ -801,6 +868,23 @@ function createGameSession() {
       sound.submit();
     });
     return true;
+  }
+
+  /** v3.4 快捷表情：只在等待对方时可用；8s 冷却由服务端限流，前端同步置灰 */
+  function sendEmote(kind: EmoteKind): void {
+    if (!emoteVisible.value) return;
+    socketApi.emitAck('room:emote', { kind }, (res) => {
+      if (!res.ok) {
+        toastApi.toast(res.message || '表情没发出去');
+        return;
+      }
+      if (!res.accepted) {
+        toastApi.toast('对方不在线或别催太急～');
+        return;
+      }
+      emoteCooldownUntil.value = Date.now() + 8000;
+      toastApi.toast('已发出：' + EMOTE_LABELS[kind].label);
+    });
   }
 
   function toggleAgree(): void {
@@ -836,6 +920,24 @@ function createGameSession() {
     });
   }
 
+  /** v3.4「结束本局」：第一次点进入 4s 确认态，4s 内再点一次才真正结束 */
+  function requestEndGame(): void {
+    if (!endAvailable.value) return;
+    if (endConfirmPending.value) {
+      endConfirmUntil.value = 0;
+      socketApi.emitAck('game:end', {}, (res) => {
+        if (!res.ok) {
+          toastApi.toast(res.message || '结束失败');
+          return;
+        }
+        toastApi.toast('本局已结束，可以查看战报或再来一局');
+      });
+      return;
+    }
+    endConfirmUntil.value = Date.now() + 4000;
+    toastApi.toast('再点一次「结束本局」确认');
+  }
+
   function restartGame(): void {
     if (restartBusy.value) return;
     restartBusy.value = true;
@@ -850,6 +952,7 @@ function createGameSession() {
       localSubmitted.value = false;
       opponentSubmitted.value = false;
       submittedAt.value = 0;
+      endConfirmUntil.value = 0;
       revealRound = 0;
       winRound = 0;
       lastReveal.value = null;
@@ -857,7 +960,10 @@ function createGameSession() {
       settleAt.value = 0;
       exportPreviewUrl.value = '';
       confetti.clear();
-      toastApi.toast('新的一局，准备好就开始！');
+      // v3.4：回到房间后若对方也已退出结算页，立即自动准备；否则等 watchingSettle 变 false
+      autoReadyPending.value = true;
+      maybeAutoReady();
+      toastApi.toast('已回到房间，双方都回来就自动开始');
     });
   }
 
@@ -1142,6 +1248,10 @@ function createGameSession() {
     waitingOn,
     waitingText,
     opponentHintOn,
+    emoteOptions,
+    emoteVisible,
+    endAvailable,
+    endConfirmPending,
     timerVisible,
     timerWidth,
     timerLow,
@@ -1178,8 +1288,10 @@ function createGameSession() {
     leaveRoom: () => leaveNow('已离开房间'),
     onReady,
     submitWord,
+    sendEmote,
     toggleAgree,
     nextRound,
+    requestEndGame,
     restartGame,
     copyInvite,
     exportImage,

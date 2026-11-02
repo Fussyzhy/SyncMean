@@ -70,6 +70,19 @@ watch(
     <p id="waiting-hint" class="hint" :class="{ 'is-on': game.waitingOn }">
       {{ game.waitingText }}
     </p>
+    <div v-if="game.emoteVisible" id="emote-row" class="emote-row">
+      <button
+        v-for="opt in game.emoteOptions"
+        :id="'btn-emote-' + opt.kind"
+        :key="opt.kind"
+        class="emote-btn"
+        type="button"
+        :disabled="opt.disabled"
+        @click="game.sendEmote(opt.kind)"
+      >
+        {{ opt.emoji }} {{ opt.label }}
+      </button>
+    </div>
     <button
       v-if="game.opened && !game.showReveal && game.opponentOffline"
       id="btn-copy-waiting"

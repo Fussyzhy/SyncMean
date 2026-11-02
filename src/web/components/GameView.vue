@@ -26,7 +26,19 @@ const game = useGameSession();
         <span class="game-top__sep" aria-hidden="true">/</span>
         <span id="game-code" class="game-top__code">{{ game.gameCode }}</span>
       </div>
-      <button id="btn-exit" class="btn-exit" type="button" @click="game.leaveRoom">退出</button>
+      <div class="game-top__actions">
+        <button
+          v-if="game.endAvailable"
+          id="btn-end"
+          class="btn-exit"
+          :class="{ 'is-confirm': game.endConfirmPending }"
+          type="button"
+          @click="game.requestEndGame"
+        >
+          {{ game.endConfirmPending ? '确认结束？' : '结束本局' }}
+        </button>
+        <button id="btn-exit" class="btn-exit" type="button" @click="game.leaveRoom">退出</button>
+      </div>
     </header>
 
     <p

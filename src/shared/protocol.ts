@@ -27,6 +27,16 @@ export type SubmitLimitMs = (typeof SUBMIT_LIMIT_OPTIONS)[number];
 /** 请求里未指定 submitLimitMs 时（含旧客户端）使用 1 分钟，与历史行为一致 */
 export const DEFAULT_SUBMIT_MS: SubmitLimitMs = 60000;
 
+/* ==================== v3.4：预设快捷表情 ==================== */
+
+/**
+ * 快捷表情白名单。只允许预设值，**不接受自由文本**：
+ * 否则会变成双盲提交阶段的暗示通道（见 PROTOCOL.md §5.1）。
+ */
+export const EMOTE_KINDS = ['nudge', 'thinking', 'cheer'] as const;
+
+export type EmoteKind = (typeof EMOTE_KINDS)[number];
+
 export type ErrorCode =
   | 'INVALID_NAME'
   | 'INVALID_CODE'
@@ -37,6 +47,7 @@ export type ErrorCode =
   | 'BAD_PHASE'
   | 'INVALID_WORD'
   | 'INVALID_SUBMIT_LIMIT'
+  | 'INVALID_EMOTE'
   | 'REPLACED'
   | 'OPPONENT_LEFT'
   | 'ROOM_DELETED'
@@ -162,6 +173,12 @@ export interface RestartOk {
   watching: boolean;
 }
 
+/** v3.4：快捷表情 ack。accepted=false 表示冷却中或对方离线，未送达 */
+export interface EmoteOk {
+  ok: true;
+  accepted: boolean;
+}
+
 /* ==================== 请求载荷 ==================== */
 
 export interface CreatePayload {
@@ -187,6 +204,11 @@ export interface SubmitPayload {
 
 export interface AgreePayload {
   agree?: boolean;
+}
+
+/** v3.4：快捷表情请求；kind 必须在 EMOTE_KINDS 内，否则 INVALID_EMOTE */
+export interface EmotePayload {
+  kind: EmoteKind;
 }
 
 /** 无载荷事件统一用它（socket.io 要求至少一个参数） */
@@ -240,6 +262,8 @@ export interface ClientToServerEvents {
   'round:submit': (payload: SubmitPayload, ack?: Ack<ActionResult<SubmitOk>>) => void;
   'round:agree': (payload?: AgreePayload, ack?: Ack<ActionResult<AgreeOk>>) => void;
   'round:next': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
+  'room:emote': (payload: EmotePayload, ack?: Ack<ActionResult<EmoteOk>>) => void;
+  'game:end': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
   'game:restart': (payload?: EmptyPayload, ack?: Ack<ActionResult<RestartOk>>) => void;
 }
 
@@ -270,6 +294,8 @@ export const CLIENT_EVENTS = [
   'round:submit',
   'round:agree',
   'round:next',
+  'room:emote',
+  'game:end',
   'game:restart',
 ] as const satisfies readonly (keyof ClientToServerEvents)[];
 

@@ -22,6 +22,8 @@ import type {
   CreateOk,
   CreatePayload,
   EmptyPayload,
+  EmoteOk,
+  EmotePayload,
   InterServerEvents,
   JoinOk,
   JoinPayload,
@@ -232,6 +234,11 @@ io.on('connection', (socket) => {
   );
 
   socket.on(
+    'room:emote',
+    handler<EmotePayload, ActionResult<EmoteOk>>((data) => game.emote(socket.id, data.kind))
+  );
+
+  socket.on(
     'round:agree',
     handler<AgreePayload, ActionResult<AgreeOk>>((data) => game.setAgree(socket.id, data.agree))
   );
@@ -244,6 +251,11 @@ io.on('connection', (socket) => {
   socket.on(
     'game:restart',
     handler<EmptyPayload, ActionResult<RestartOk>>(() => game.restart(socket.id))
+  );
+
+  socket.on(
+    'game:end',
+    handler<EmptyPayload, ActionResult<SimpleOk>>(() => game.endGame(socket.id))
   );
 
   socket.on('disconnect', () => {

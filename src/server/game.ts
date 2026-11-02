@@ -15,7 +15,7 @@
 
 import { randomInt, randomUUID } from 'node:crypto';
 
-import { DEFAULT_SUBMIT_MS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
+import { DEFAULT_SUBMIT_MS, EMOTE_KINDS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
 import type {
   ActionError,
   ActionResult,
@@ -24,6 +24,8 @@ import type {
   Basis,
   CreateOk,
   CreatePayload,
+  EmoteKind,
+  EmoteOk,
   ErrorCode,
   HistoryItem,
   JoinOk,
@@ -42,6 +44,7 @@ import type {
 // ==================== 时间参数（PROTOCOL.md §3，集中于此） ====================
 const COUNTDOWN_MS = 3000; // 3-2-1
 const START_DELAY = 300; // 双方准备后稍等再倒计时
+const EMOTE_COOLDOWN_MS = 8000; // v3.4：快捷表情冷却（8 秒内重复发送不送达）
 
 // 全员离线后的房间保留时长与清理扫描周期（PROTOCOL.md §8）
 const OFFLINE_ROOM_TTL_MS = 10 * 60 * 1000;
@@ -73,6 +76,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   BAD_PHASE: '当前阶段无法进行此操作',
   INVALID_WORD: '词需为 1–12 个字符',
   INVALID_SUBMIT_LIMIT: '填词时限只能是不限时 / 1 分钟 / 3 分钟 / 5 分钟',
+  INVALID_EMOTE: '快捷表情无效',
   REPLACED: '你的连接已在别处打开，当前会话被顶替',
   OPPONENT_LEFT: '对手已离开房间',
   ROOM_DELETED: '房间已解散',
@@ -82,6 +86,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
 export const constants = {
   COUNTDOWN_MS,
   START_DELAY,
+  EMOTE_COOLDOWN_MS,
   OFFLINE_ROOM_TTL_MS,
   SWEEP_INTERVAL_MS,
   SETTLE_OFFLINE_GRACE_MS,
@@ -115,6 +120,8 @@ export interface Player {
   settleDismissed: boolean;
   /** v3.3：本次离线开始时刻（毫秒）；在线 / 从未离线时为 null。用于离线兜底判定 */
   offlineAt: number | null;
+  /** v3.4：上次成功发送快捷表情的时刻（毫秒）；冷却判定用，重连后保留 */
+  lastEmoteAt: number | null;
 }
 
 /** v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角 */
@@ -338,6 +345,7 @@ export class Game {
       isHost: true,
       settleDismissed: false, // v2.1：是否已退出结算页（PROTOCOL.md §5.3.1）
       offlineAt: null, // v3.3：新建玩家在线，尚未离线
+      lastEmoteAt: null, // v3.4：尚未发过快捷表情
     };
 
     const room: Room = {
@@ -419,6 +427,7 @@ export class Game {
       isHost: room.players.length === 0 || !room.players.some((p) => p.isHost),
       settleDismissed: false, // v2.1：新玩家从不属于上一局的结算页
       offlineAt: null, // v3.3：新玩家在线，尚未离线
+      lastEmoteAt: null, // v3.4：尚未发过快捷表情
     };
     room.players.push(player);
     // v2.1：新玩家加入同一房间 → 上一局的结算快照作废，没人该卡在假 won
@@ -528,6 +537,52 @@ export class Game {
   }
 
   /**
+   * v3.4：快捷表情（PROTOCOL.md §5.1）。
+   * 只在双盲提交阶段开放；kind 必须是预设白名单（绝不接受自由文本）。
+   * 只发给对方，发送者不回显；8 秒冷却、对方离线都返回 {ok:true, accepted:false}。
+   */
+  emote(socketId: string | null, kind?: unknown): ActionResult<EmoteOk> {
+    const found = this._findBySocket(socketId);
+    if (!found) return fail('NOT_IN_ROOM');
+    const { room, player } = found;
+    if (room.phase !== 'submitting') return fail('BAD_PHASE');
+    if (typeof kind !== 'string' || !(EMOTE_KINDS as readonly string[]).includes(kind)) {
+      return fail('INVALID_EMOTE');
+    }
+    const emoteKind = kind as EmoteKind;
+
+    const opponent = room.players.find((p) => p.seat !== player.seat) || null;
+    // 对方不存在（还没人加入 / 已离开）或已离线：不送达，但不算调用错误
+    if (!opponent || !opponent.connected) return { ok: true, accepted: false };
+
+    const now = Date.now();
+    if (player.lastEmoteAt != null && now - player.lastEmoteAt < EMOTE_COOLDOWN_MS) {
+      return { ok: true, accepted: false };
+    }
+
+    player.lastEmoteAt = now;
+    this._emitPlayer(opponent, 'room:notice', {
+      kind: 'info',
+      text: this._emoteText(player.name, emoteKind),
+    });
+    return { ok: true, accepted: true };
+  }
+
+  /** v3.4：预设表情文案（含发送者昵称），只允许白名单 kind */
+  _emoteText(name: string, kind: EmoteKind): string {
+    switch (kind) {
+      case 'nudge':
+        return `${name} 催你啦：快一点～`;
+      case 'thinking':
+        return `${name} 说：还在想，别急～`;
+      case 'cheer':
+        return `${name} 给你加油：稳住！`;
+      default:
+        return '';
+    }
+  }
+
+  /**
    * v2：本轮同意词投票（PROTOCOL.md §5.1）。
    * 仅 reveal 阶段有效；只记录票面，两票齐则通关（winBy='agree'）。
    * 投票不改变 reveal 的推进方式：reveal 永不自动推进，只能由 round:next 进入下一轮。
@@ -600,28 +655,7 @@ export class Game {
     this._clearTimer(room);
 
     if (room.phase === 'won') {
-      // 1) 冻结整局快照：history / result 形状与 §5.3 完全一致
-      room.lastGame = {
-        round: room.round,
-        basis: room.basis ? { a: room.basis.a, b: room.basis.b } : null,
-        history: this._publicHistory(room.history),
-        result: this._publicResult(room.result),
-        endedAt: Date.now(),
-      };
-      // 2) 房间内部照常重置为 lobby（与旧行为相同）
-      room.phase = 'lobby';
-      room.round = 1;
-      room.basis = null;
-      room.submissions = { a: null, b: null };
-      room.agree = { a: false, b: false };
-      room.result = null;
-      room.history = [];
-      room.deadline = null;
-      room.lastActivityAt = Date.now();
-      for (const p of room.players) {
-        p.ready = false;
-        p.settleDismissed = false;
-      }
+      this._freezeAndReset(room);
     }
 
     // 只有全部在场玩家都退出了，快照才真正作废
@@ -639,6 +673,56 @@ export class Game {
     }
     this.broadcastState(room);
     return { ok: true, watching: staying.length > 0 };
+  }
+
+  /**
+   * v3.4：不经过通关、直接把当前对局结束掉（PROTOCOL.md §5.1）。
+   * 内部复用 restart 的「冻结 + 重置」；区别是两名玩家都保持 settleDismissed=false，
+   * 因此双方都会进入 won 结算视角、看到同一份战报。
+   */
+  endGame(socketId: string | null): ActionResult<SimpleOk> {
+    const found = this._findBySocket(socketId);
+    if (!found) return fail('NOT_IN_ROOM');
+    const { room } = found;
+    if (!ACTIVE_PHASES.includes(room.phase)) return fail('BAD_PHASE');
+
+    this._clearTimer(room);
+    this._freezeAndReset(room);
+    this._emitRoom(room, 'room:notice', {
+      kind: 'system',
+      text: '本局已结束，双方都可以查看战报并再来一局',
+    });
+    this.broadcastState(room);
+    return { ok: true };
+  }
+
+  /**
+   * v2.1 / v3.4：把当前对局冻结进 lastGame 快照，并把房间内部重置为 lobby。
+   * restart（首次退出）与 endGame（未通关结束本局）共用，避免两份逻辑漂移。
+   */
+  _freezeAndReset(room: Room): void {
+    // 1) 冻结整局快照：history / result 形状与 §5.3 完全一致
+    room.lastGame = {
+      round: room.round,
+      basis: room.basis ? { a: room.basis.a, b: room.basis.b } : null,
+      history: this._publicHistory(room.history),
+      result: this._publicResult(room.result),
+      endedAt: Date.now(),
+    };
+    // 2) 房间内部照常重置为 lobby（与旧行为相同）
+    room.phase = 'lobby';
+    room.round = 1;
+    room.basis = null;
+    room.submissions = { a: null, b: null };
+    room.agree = { a: false, b: false };
+    room.result = null;
+    room.history = [];
+    room.deadline = null;
+    room.lastActivityAt = Date.now();
+    for (const p of room.players) {
+      p.ready = false;
+      p.settleDismissed = false;
+    }
   }
 
   disconnect(socketId: string): SimpleOk {
