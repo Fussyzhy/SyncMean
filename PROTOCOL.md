@@ -1,6 +1,9 @@
-# 同声传意 · 联机版 —— 协议契约 v3（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3.1（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3.1 变更（相对 v3）**：新增**明暗主题**（默认跟随系统、兜底明亮、显式选择持久化）。
+> 协议事件与字段零变化；新增 `#btn-theme` DOM id 与 §13 主题契约，`<html>` 上增加 `data-theme` / `data-theme-source` 两个属性。
 >
 > **v3 变更（相对 v2）**：技术栈升级，**协议本身零变化**——事件名、字段名、错误码、DOM id、状态机语义全部保持 v2。变化只在工程层：
 > 1. 全部源码改为 TypeScript（ESM），后端 `tsc` 编译到 `dist/server`；
@@ -294,7 +297,6 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 ```
 
 **v2 新增（结算视图）**，第四个视图 `#view-settle`，**接收者视角** `state.phase === 'won'` 时展示（对方已 restart 时，留守者的 won 视角来自 `lastGame` 快照，见 §5.3.1）：
-
 ```
 #view-settle          结算视图容器
 #settle-title         通关方式标题（一模一样通关 / 双方确认同意词通关）
@@ -311,6 +313,14 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 
 `#btn-restart` / `#btn-leave-win` 的 id 与语义保持不变，只是宿主容器改为结算视图；`#win-actions` 容器名不再被要求。自动化验收会通过这两个 id 驱动重开流程。
 
+**v3.1 新增（明暗主题）**：
+
+```
+#btn-theme            主题切换按钮（所有视图都必须可见/可点；aria-pressed=当前是否深色，aria-label 描述下一动作）
+```
+
+`<html>` 上必须始终带有 `data-theme="light|dark"` 与 `data-theme-source="system|user"`（语义见 §13）。
+
 ## 10. 验收标准
 
 1. `yarn test` 通过：`tools/sim.ts` 自起服务，两个 socket 客户端完成 创建→加入→双方 ready→收到 countdown→open→各自 submit→reveal 判定「不同」→下一轮→第二轮提交相同→won→restart→回 lobby；断言所有关键事件与字段，并断言「在对方提交前拿不到对方词」。
@@ -323,7 +333,8 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
-11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收 63 条全过，且 #reveal-verdict / #agree-hint 两个旧版缺失的 DOM id 现在必须存在。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint 两个旧版缺失的 DOM id 现在必须存在。
+12. **明暗模式（v3.1）**：无存储时跟随系统 `prefers-color-scheme`；系统能力不可用（无 `matchMedia`）时**兜底明亮**；`#btn-theme` 单击切换并把 `321:theme` 写入 localStorage，刷新后保持；Shift+单击清除存储回到「跟随系统」；深浅两套主题的 `body` 背景色不同、正文与按钮文字对比度 ≥ 4.5:1；`<html data-theme>`、`data-theme-source` 与 `<meta name="theme-color">` 同步更新。
 
 ## 11. 导出图片契约（纯前端）
 
@@ -340,4 +351,20 @@ won --(一方已 restart，另一方仍在结算页)--> 内部已是 lobby，但
 - 任何进入 loading 的按钮，**必须在渲染阶段按当前真实忙态重新赋值**（`classList.toggle('is-busy', busy)`，Vue 里就是在组件渲染期 / computed / watch 里按 ref 重刷），不能只依赖请求回调去移除。
 - 理由：ack 回调到达时服务端可能已广播了新 phase，渲染走了别的分支，`is-busy` 就永久残留；而 CSS 里 `.btn.is-busy { color: transparent }` 会让按钮「没有文字 + 一直转圈」。
 - 因此：房间视图必须显式清/设 `#btn-ready` 的 `is-busy` 与 `aria-busy`；对局面板必须对 `#btn-submit` 同理；回到 lobby、离开房间、`aborted`、重开、断线重连这几条路径都要把各自按钮的 loading 态归位。
-- 新加的 `#btn-agree` / `#btn-export` / `#btn-next` / `#btn-restart` 也必须遵守同一条规则。
+- 新加的 `#btn-agree` / `#btn-export` / `#btn-next` / `#btn-restart` / `#btn-theme` 也必须遵守同一条规则。
+
+## 13. 明暗主题契约（v3.1）
+
+- **状态只存在 HTML 上**：`<html data-theme="light|dark" data-theme-source="system|user">`。CSS 只认这两个属性；组件层不得各自维护主题状态（统一走 `src/web/composables/useTheme.ts` 单例）。
+- **解析优先级**：
+  1. `localStorage['321:theme']` 为 `'light' | 'dark'` → 用户显式选择（`source: 'user'`）；
+  2. 否则跟随系统 `prefers-color-scheme`（`source: 'system'`）；
+  3. 系统能力不可用（没有 `matchMedia` / 调用抛错 / `matches` 非布尔）→ **兜底明亮**；
+  4. 存储里是其它任何值（手动改坏、旧版本残留）→ 视为「未选择」，回到 2。
+- **持久化时机**：只有用户通过 `#btn-theme` 做出显式选择才写 `321:theme`；回到「跟随系统」时删除该键（不写 `'system'`）。
+- **切换交互**（`#btn-theme`）：单击在明亮 / 深色之间翻转；**Shift + 单击**清除显式选择、回到「跟随系统」。图标表示**当前**主题（🌙 深色 / ☀️ 明亮），`aria-pressed` 表示当前是否深色，`aria-label` 描述**下一动作**。
+- **跟随系统期间**必须监听 `matchMedia('(prefers-color-scheme: dark)')` 的 `change` 事件实时更新；一旦是显式选择，系统变化不再生效。
+- **防闪烁**：`src/web/index.html` 在 `<head>` 的内联脚本里、首屏绘制前用同一套规则写入 `data-theme` / `data-theme-source`。规则或键名改动时必须同步该脚本与 `src/web/lib/theme.ts`（键名 `321:theme` 在两处硬编码，`storage.ts` 里有注释提醒）。
+- **`<meta name="theme-color">`**：取当前主题下 `--bg-0` 的计算值（配色只在 SCSS 定义，TS 不复制调色板）。
+- **CSS 侧约定**：`:root` 输出深色令牌；浅色令牌同时挂在 `:root[data-theme='light']` 与 `@media (prefers-color-scheme: light) { :root:not([data-theme]) }`（无 JS 时也能按系统走）；两套主题各自声明 `color-scheme`。
+- **导出 PNG 不受主题影响**：始终使用 §11 的深色霓虹版式，保证分享图品牌一致。

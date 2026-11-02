@@ -2,7 +2,7 @@
 /**
  * 应用根组件：
  * - 四个视图常驻 DOM（与旧 index.html 一致），按 state.phase 派发 view--active；
- * - 全局层：#btn-sound / #net-banner / #countdown-overlay / #confetti / #toast；
+ * - 全局层：#btn-sound / #btn-theme / #net-banner / #countdown-overlay / #confetti / #toast；
  * - 启动旧 init() 的等价物 + 100ms 主循环（倒计时数字与提交进度条）。
  */
 import { onBeforeUnmount, watch } from 'vue';
@@ -15,11 +15,17 @@ import ConfettiLayer from '@/components/ConfettiLayer.vue';
 import ToastHost from '@/components/ToastHost.vue';
 import NetBanner from '@/components/NetBanner.vue';
 import SoundToggle from '@/components/SoundToggle.vue';
+import ThemeToggle from '@/components/ThemeToggle.vue';
 import { useGameSession } from '@/composables/useGameSession';
 import { useCountdown } from '@/composables/useCountdown';
+import { useTheme } from '@/composables/useTheme';
 
 const game = useGameSession();
 const clock = useCountdown();
+const theme = useTheme();
+
+// 明暗主题：index.html 的内联脚本已在首屏前写好 data-theme，这里接管状态 + 监听系统变化
+theme.init();
 
 // 旧 init()：token / 会话 / 昵称 / 音效 / 邀请链接 / socket（同步完成，子组件挂载前就绪）
 game.init();
@@ -53,6 +59,7 @@ onBeforeUnmount(() => {
 
 <template>
   <SoundToggle />
+  <ThemeToggle />
   <NetBanner />
 
   <main class="app">

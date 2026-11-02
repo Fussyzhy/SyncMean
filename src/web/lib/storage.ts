@@ -12,6 +12,14 @@ export const KEY_NICK = '321:nick';
 export const KEY_TOKEN = '321:token';
 export const KEY_SESSION = '321:session';
 export const KEY_SOUND = '321:sound';
+/**
+ * 明暗主题的「用户显式选择」。注意：`index.html` 里的防闪烁内联脚本也硬编码了
+ * 这个键名（内联脚本无法 import），改这里必须同步改 index.html。
+ */
+export const KEY_THEME = '321:theme';
+
+/** 'light' | 'dark'；null 表示没选过 → 跟随系统 */
+export type ThemeMode = 'light' | 'dark';
 
 /** 存在 sessionStorage 里的对局会话（字段沿用旧实现） */
 export interface StoredSession {
@@ -55,6 +63,20 @@ export function loadSound(): boolean {
 
 export function saveSound(on: boolean): void {
   writeLocal(KEY_SOUND, on ? '1' : '0');
+}
+
+/**
+ * 读取用户显式选择的主题。
+ * 只认 'light' / 'dark'；其它值（含旧版本残留、手动改坏）一律当作「没选过」→ 跟随系统。
+ */
+export function loadTheme(): ThemeMode | null {
+  const raw = readLocal(KEY_THEME);
+  return raw === 'light' || raw === 'dark' ? raw : null;
+}
+
+/** 传 null 表示清除显式选择、回到「跟随系统」 */
+export function saveTheme(mode: ThemeMode | null): void {
+  writeLocal(KEY_THEME, mode);
 }
 
 /* ---------------- sessionStorage（token / 会话） ---------------- */

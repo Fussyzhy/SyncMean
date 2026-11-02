@@ -8,8 +8,44 @@
       name="description"
       content="同声传意 · 双人联机小游戏，各想一个词，3-2-1 同时揭晓，想到一起就通关。"
     />
-    <meta name="color-scheme" content="dark" />
+    <!-- 允许浏览器按系统偏好预渲染原生控件；实际主题由下面的内联脚本与 JS 决定 -->
+    <meta name="color-scheme" content="light dark" />
     <title>同声传意 · 双人联机</title>
+    <script>
+      /*
+       * 防闪烁（FOUC）：首屏绘制前先把主题写到 <html data-theme>。
+       * 规则必须与 src/web/lib/theme.ts 完全一致（内联脚本无法 import，故此处硬编码键名）：
+       *   1. localStorage['321:theme'] 是 'light' | 'dark' → 用用户选择（source=user）
+       *   2. 否则跟随系统 prefers-color-scheme（source=system）
+       *   3. 系统能力不可用 → 兜底明亮
+       */
+      (function () {
+        var stored = null;
+        try {
+          stored = window.localStorage.getItem('321:theme');
+        } catch (e) {
+          stored = null;
+        }
+        if (stored !== 'light' && stored !== 'dark') stored = null;
+
+        var resolved = stored;
+        if (!resolved) {
+          try {
+            var media =
+              typeof window.matchMedia === 'function'
+                ? window.matchMedia('(prefers-color-scheme: dark)')
+                : null;
+            resolved = media && media.matches ? 'dark' : 'light';
+          } catch (e) {
+            resolved = 'light';
+          }
+        }
+
+        var root = document.documentElement;
+        root.setAttribute('data-theme', resolved);
+        root.setAttribute('data-theme-source', stored ? 'user' : 'system');
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

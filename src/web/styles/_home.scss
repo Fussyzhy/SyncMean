@@ -1,6 +1,7 @@
 // =============================================================================
 // 首页：品牌区、分割线、玩法三步、免责小字
 // 对应 public/style.css 第 312–413 行
+// 品牌渐变文字走 --brand-grad-*（浅色下压深），kicker/序号走 --kicker-* / --step-n-*。
 // =============================================================================
 
 @use 'variables' as *;
@@ -15,8 +16,8 @@
     margin: 0 0 12px;
     padding: 5px 12px;
     border-radius: $radius-pill;
-    border: 1px solid rgba($lime, 0.28);
-    background: rgba($lime, 0.08);
+    border: 1px solid var(--kicker-line);
+    background: var(--kicker-bg);
     color: var(--lime);
     font-size: 11px;
     font-weight: 700;
@@ -31,9 +32,9 @@
     letter-spacing: -0.02em;
   }
 
-  // 渐变品牌字（含霓虹投影）
+  // 渐变品牌字（含霓虹/浅色投影）
   &__num {
-    @include gradient-text($grad-brand, 0 8px 26px rgba($cyan, 0.28));
+    @include gradient-text($grad-brand, 0 8px 26px var(--glow-cyan-soft));
   }
 
   &__sub {
@@ -90,7 +91,7 @@
   font-size: 11px;
   text-align: center;
   border-radius: $radius-chip;
-  border: 1px dashed $line-faint;
+  border: 1px dashed var(--line-faint);
 
   &__n {
     width: 22px;
@@ -101,7 +102,7 @@
     font-size: 11px;
     font-weight: 800;
     color: var(--cyan);
-    background: rgba($cyan, 0.1);
-    border: 1px solid rgba($cyan, 0.25);
+    background: var(--step-n-bg);
+    border: 1px solid var(--step-n-line);
   }
 }

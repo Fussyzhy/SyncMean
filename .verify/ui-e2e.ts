@@ -575,6 +575,36 @@ class Page {
 /* 断言与流程                                                          */
 /* ------------------------------------------------------------------ */
 
+/* ---------------- 明暗主题辅助（PROTOCOL.md §13） ---------------- */
+
+/** 固定/切换 prefers-color-scheme（影响 CSS 媒体查询与 matchMedia） */
+async function emulateColorScheme(page: Page, value: 'light' | 'dark'): Promise<void> {
+  await page.send('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-color-scheme', value }],
+  });
+}
+
+interface ThemeSnapshot {
+  theme: string;
+  source: string;
+  stored: string | null;
+}
+
+/** 读取 <html data-theme> / data-theme-source / localStorage 里的显式选择 */
+async function themeState(page: Page): Promise<ThemeSnapshot> {
+  const raw = await page.eval(`(() => ({
+    theme: document.documentElement.getAttribute('data-theme'),
+    source: document.documentElement.getAttribute('data-theme-source'),
+    stored: (() => { try { return localStorage.getItem('321:theme'); } catch (e) { return null; } })(),
+  }))()`);
+  const record = asRecord(raw);
+  return {
+    theme: typeof record.theme === 'string' ? record.theme : '',
+    source: typeof record.source === 'string' ? record.source : '',
+    stored: typeof record.stored === 'string' ? record.stored : null,
+  };
+}
+
 const problems: string[] = [];
 function check(cond: unknown, msg: string): void {
   if (cond) log(`  ✅ ${msg}`);
@@ -598,6 +628,8 @@ interface RoundOptions {
 async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   log('\n[1] 玩家 A 打开首页');
   const a = await browser.newPage();
+  // 主流程固定为「系统深色」：视觉基线稳定，也让深色主题成为被回归验证的那一套
+  await emulateColorScheme(a, 'dark');
   await a.goto(APP_URL + '/');
   await a.waitFor('!!document.querySelector("#view-home")', 15000, '首页渲染');
   await a.screenshot('01-home.png');
@@ -615,6 +647,7 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
 
   log('\n[3] 玩家 B 通过邀请链接加入');
   const b = await browser.newPage();
+  await emulateColorScheme(b, 'dark');
   await b.goto(`${APP_URL}/?room=${encodeURIComponent(code)}`);
   await b.waitFor('!!document.querySelector("#code-input")', 15000, 'B 首页渲染');
   const prefilled = await b.eval('document.querySelector("#code-input").value');
@@ -847,6 +880,98 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   check(pageErr.length === 0, `无未捕获异常（${pageErr.length} 条）`);
   if (consoleErr.length) console.error('  console errors:', consoleErr.slice(0, 5));
   if (pageErr.length) console.error('  page errors:', pageErr.slice(0, 5));
+
+  log('\n[11] 明暗模式：默认跟随系统 / 兜底明亮 / 切换后持久化');
+  const btns = await a.eval(`(() => {
+    const t = document.querySelector('#btn-theme');
+    const s = document.querySelector('#btn-sound');
+    if (!t || !s) return null;
+    const tr = t.getBoundingClientRect();
+    const sr = s.getBoundingClientRect();
+    const overlap = !(tr.right <= sr.left || sr.right <= tr.left || tr.bottom <= sr.top || sr.bottom <= tr.top);
+    return { overlap, label: t.getAttribute('aria-label') || '', pressed: t.getAttribute('aria-pressed') || '', text: (t.textContent || '').trim(), visible: tr.width > 0 && tr.height > 0 };
+  })()`);
+  const btnRecord = asRecord(btns);
+  check(btnRecord.visible === true, '#btn-theme 主题切换按钮渲染且可见');
+  check(btnRecord.overlap === false, '#btn-theme 与 #btn-sound 不重叠');
+  check(btnRecord.pressed === 'true', `深色下 #btn-theme aria-pressed="true"（实际 "${String(btnRecord.pressed)}"）`);
+  check(/明亮/.test(String(btnRecord.label)), `深色下 aria-label 指向「切到明亮」（"${String(btnRecord.label)}"）`);
+  check(String(btnRecord.text) === '🌙', `深色下图标为月亮（"${String(btnRecord.text)}"）`);
+
+  const themeInit = await themeState(a);
+  check(themeInit.theme === 'dark' && themeInit.source === 'system', `没选过时跟随系统（theme=${themeInit.theme}, source=${themeInit.source}）`);
+  const darkBg = String(await a.eval('getComputedStyle(document.body).backgroundColor'));
+
+  await a.click('#btn-theme');
+  await a.waitFor('document.documentElement.getAttribute("data-theme") === "light"', 5000, '单击后切到明亮');
+  const afterToggle = await themeState(a);
+  check(afterToggle.theme === 'light' && afterToggle.source === 'user', `单击后为明亮 + 显式选择（theme=${afterToggle.theme}, source=${afterToggle.source}）`);
+  check(afterToggle.stored === 'light', `切换后写入 localStorage 321:theme=light（实际 ${String(afterToggle.stored)}）`);
+  const lightBg = String(await a.eval('getComputedStyle(document.body).backgroundColor'));
+  check(darkBg !== lightBg, `深浅两套主题背景色确实不同（dark=${darkBg} / light=${lightBg}）`);
+  const metaContent = String(await a.eval('(() => { const m = document.querySelector(\'meta[name="theme-color"]\'); return m ? m.getAttribute("content") : ""; })()'));
+  const tokenBg0 = String(await a.eval('getComputedStyle(document.documentElement).getPropertyValue("--bg-0").trim()'));
+  check(!!metaContent && metaContent.toLowerCase() === tokenBg0.toLowerCase(), `meta theme-color 跟随主题（meta=${metaContent}, --bg-0=${tokenBg0}）`);
+  await a.screenshot('19-theme-light.png');
+
+  // 持久化：系统仍是深色，刷新后必须保持用户选的明亮
+  await a.goto(APP_URL + '/');
+  await a.waitFor('document.readyState === "complete"', 20000, '刷新完成');
+  const afterReload = await themeState(a);
+  check(afterReload.theme === 'light' && afterReload.source === 'user', `刷新后仍为明亮（持久化生效，theme=${afterReload.theme}, source=${afterReload.source}）`);
+
+  // 单击在明亮/深色之间翻转，且始终写入显式选择
+  await a.click('#btn-theme');
+  await a.waitFor('document.documentElement.getAttribute("data-theme") === "dark"', 5000, '再次单击切到深色');
+  const secondClick = await themeState(a);
+  check(secondClick.theme === 'dark' && secondClick.source === 'user' && secondClick.stored === 'dark', `第二次单击 → 深色且已存储（stored=${String(secondClick.stored)}）`);
+  await a.click('#btn-theme');
+  await a.waitFor('document.documentElement.getAttribute("data-theme") === "light"', 5000, '第三次单击切回明亮');
+  const thirdClick = await themeState(a);
+  check(thirdClick.theme === 'light' && thirdClick.source === 'user' && thirdClick.stored === 'light', `第三次单击 → 明亮且已存储（stored=${String(thirdClick.stored)}）`);
+
+  // Shift + 单击：清除显式选择、回到「跟随系统」（系统仍是 emulated dark）
+  await a.eval(`(() => {
+    const el = document.querySelector('#btn-theme');
+    if (!el) return false;
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
+    return true;
+  })()`);
+  await a.waitFor('document.documentElement.getAttribute("data-theme-source") === "system"', 5000, 'Shift+单击回到跟随系统');
+  const afterReset = await themeState(a);
+  check(afterReset.source === 'system' && afterReset.theme === 'dark' && afterReset.stored === null, `Shift+单击回到跟随系统并清空存储（theme=${afterReset.theme}, stored=${String(afterReset.stored)}）`);
+
+  // 跟随系统：系统明亮 → 明亮；系统切深色 → 实时跟随
+  const c = await browser.newPage();
+  await emulateColorScheme(c, 'light');
+  await c.goto(APP_URL + '/');
+  await c.waitFor('!!document.querySelector("#view-home")', 15000, 'C 首页渲染');
+  const cLight = await themeState(c);
+  check(cLight.theme === 'light' && cLight.source === 'system', `系统明亮时默认明亮（theme=${cLight.theme}, source=${cLight.source}）`);
+  await emulateColorScheme(c, 'dark');
+  await c.waitFor('document.documentElement.getAttribute("data-theme") === "dark"', 8000, '系统切深色后实时跟随');
+  check(true, '跟随系统期间系统主题变化实时生效（matchMedia change）');
+
+  // 兜底明亮：matchMedia 不可用（在页面脚本之前注入）
+  const d = await browser.newPage();
+  await emulateColorScheme(d, 'dark');
+  await d.send('Page.addScriptToEvaluateOnNewDocument', { source: 'try { window.matchMedia = undefined; } catch (e) {}' });
+  await d.goto(APP_URL + '/');
+  await d.waitFor('!!document.querySelector("#view-home")', 15000, 'D 首页渲染');
+  const dFallback = await themeState(d);
+  check(dFallback.theme === 'light' && dFallback.source === 'system', `matchMedia 不可用时兜底明亮（theme=${dFallback.theme}, source=${dFallback.source}）`);
+
+  // 存储值非法 → 按「未选择」处理（D 的 matchMedia 已被摘掉，仍应兜底明亮）
+  await d.eval('(() => { try { localStorage.setItem("321:theme", "banana"); } catch (e) {} })()');
+  await d.goto(APP_URL + '/');
+  await d.waitFor('document.readyState === "complete"', 20000, '非法存储值刷新');
+  const dInvalid = await themeState(d);
+  check(dInvalid.source === 'system' && dInvalid.theme === 'light', `非法存储值按「未选择」处理（theme=${dInvalid.theme}, source=${dInvalid.source}）`);
+
+  const themeConsoleErrors = [...c.consoleErrors, ...d.consoleErrors].filter((e) => e && !/favicon/i.test(e));
+  const themePageErrors = [...c.pageErrors, ...d.pageErrors];
+  check(themeConsoleErrors.length === 0, `主题相关页面无 console error（${themeConsoleErrors.length} 条）`);
+  check(themePageErrors.length === 0, `主题相关页面无未捕获异常（${themePageErrors.length} 条）`);
 
   return { a, b };
 }

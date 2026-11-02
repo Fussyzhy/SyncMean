@@ -1,6 +1,7 @@
 // =============================================================================
 // 按钮：.btn 基座 + 变体（primary/ghost/plain/block）+ 忙态 spinner + .btn-exit
 // 对应 public/style.css 第 211–310 行、656–680 行
+// 颜色走主题令牌：填充渐变用 --fill-*（亮色填充 + 深墨字），表面/描边用 --surface-* / --line。
 // =============================================================================
 
 @use 'variables' as *;
@@ -38,11 +39,11 @@
     filter: grayscale(0.25);
   }
 
-  // ---- 主按钮：青绿→柠檬黄渐变，深色墨字 ----
+  // ---- 主按钮：青绿→柠檬黄渐变，深色墨字（两套主题都保持「亮填充 + 墨字」） ----
   &--primary {
     color: $ink;
     background: $grad-primary;
-    box-shadow: 0 14px 32px -16px rgba($cyan, 0.85);
+    box-shadow: 0 14px 32px -16px var(--glow-cyan);
 
     &:active:not(:disabled) {
       filter: brightness(1.04);
@@ -52,12 +53,12 @@
   // ---- 幽灵按钮 ----
   &--ghost {
     color: var(--text);
-    background: rgba($white, 0.055);
+    background: var(--surface-control);
     border-color: var(--line);
 
     &:hover:not(:disabled) {
-      border-color: rgba($cyan, 0.4);
-      background: rgba($cyan, 0.08);
+      border-color: var(--ghost-hover-line);
+      background: var(--ghost-hover-bg);
     }
   }
 
@@ -80,6 +81,8 @@
   }
 
   // 忙态：文字透明 + ::after 转圈
+  // 转圈轨道画在「亮色填充」上，用 $ink 半透明是主题无关的（填充色深浅两套都保持足够亮），
+  // 所以这里保留字面值，不额外造令牌。
   &.is-busy {
     position: relative;
     color: transparent;
@@ -99,7 +102,7 @@
   // 幽灵按钮忙态：转圈改青色。
   // 必须排在 .btn.is-busy::after 之后 —— 同特异性 (0,2,1) 依源码顺序覆盖。
   &--ghost.is-busy::after {
-    border-color: rgba($white, 0.2);
+    border-color: var(--spinner-track);
     border-top-color: var(--cyan);
   }
 }
@@ -111,7 +114,7 @@
   padding: 0 14px;
   border-radius: $radius-s;
   border: 1px solid var(--line);
-  background: rgba($white, 0.045);
+  background: var(--surface-control-weak);
   color: var(--muted);
   @include button-base;
   font-size: 13px;

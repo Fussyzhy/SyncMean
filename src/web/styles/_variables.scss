@@ -1,50 +1,30 @@
 // =============================================================================
-// 设计令牌（Design Tokens）
-// 蓝本：public/style.css 的 :root（只读，勿改）。
-// - 提炼为 SCSS 变量，供各分片 @use 复用；
-// - :root 的 CSS 自定义属性一条不少地保留，运行时可覆盖性与既有 var() 引用不变。
+// 设计令牌（Design Tokens）· 明暗双主题
+//
+// 主题契约（PROTOCOL.md §13，Lead 定）：
+//   - 主题以 <html data-theme="light|dark" data-theme-source="system|user"> 表达；
+//   - 深色 = 现状，默认值写在 :root（深色令牌即「零回归基线」）；
+//   - 浅色令牌挂在两个选择器上（同一份 map 输出两遍）：
+//       :root[data-theme='light']
+//       @media (prefers-color-scheme: light) { :root:not([data-theme]) }  ← 无 JS 兜底
+//   - :root 保持 color-scheme: dark，浅色块里 color-scheme: light（原生控件跟随）。
+//
+// 令牌命名约定：
+//   - 语义优先：--bg-*（底）、--surface-*（面板/控件面）、--input-*、--tint 家族按组件语义；
+//   - --fill-*  = 「亮色填充」，用于渐变按钮/头像/胶囊的底色，深色下必须足够亮，
+//                 浅色下也保持亮度，让上面的深色墨字（$ink 家族）始终 ≥ 4.5:1；
+//   - --brand-grad-* = 渐变「文字」的三段色（品牌字/房间码/倒计时/判词/结算标题），
+//                 浅色下必须压深才能压在浅底上读得清；
+//   - --glow-*  = 霓虹投影颜色；浅色下换成低饱和低透明度的同色投影，避免脏边。
+//
+// 深色值一律等于迁移前的字面值（逐值对照 public/style.css 蓝本），保证「深色零回归」。
 // =============================================================================
 
-// ---- 背景 / 面板 / 描边 ----
-$bg-0: #070b14;
-$bg-1: #0a1220;
-$bg-mid: #091120;
-$bg-deep: #060a12;
-$panel: rgba(17, 28, 47, 0.72);
-$panel-soft: rgba(255, 255, 255, 0.05);
-$line-base: #8caad7;
-$line: rgba($line-base, 0.16);
-$line-strong: rgba($line-base, 0.32);
-$line-faint: rgba($line-base, 0.14);
-
-// ---- 文本 ----
-$text: #eef4ff;
-$muted: #94a6c4;
-$dim: #6c7f9e;
-
-// ---- 品牌色 ----
-$cyan: #3ee6d6;
-$lime: #d8ff5c;
-$pink: #ff7ab6;
-$warn: #ffb454;
-
-// ---- 亮底上的深色墨字 ----
+// ---- 墨字（亮色填充上的深色文字，两套主题共用；主题无关，故留在 Sass 层）----
 $ink: #04161a;
-$ink-selection: #04121a;
 $ink-pink: #22091a;
 $ink-agree: #12100a;
 $ink-warn: #241300;
-
-// ---- 辅助色 ----
-$white: #ffffff;
-$mint: #79f0b4;
-$lime-soft: #ffe98a;
-$warn-soft: #ffce6a;
-$danger: #ff5f6d;
-$indigo: #4e6cff;
-$verdict-ink: #d7e7ff;
-$tip-ink: #c9f6f1;
-$tip-win-ink: #f0ffcf;
 
 // ---- 圆角 ----
 $radius-l: 24px;
@@ -56,51 +36,353 @@ $radius-card: 20px;
 $radius-chip: 14px;
 $radius-pill: 999px;
 
-// ---- 阴影 / 字体栈 ----
-$shadow: 0 22px 48px -24px rgba(0, 0, 0, 0.9);
+// ---- 字体栈 / 断点 ----
 $font: '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif';
 
-// ---- 断点 ----
 // 旧样式实际使用 359px（超窄手机）与 600px（桌面微调）；375px 为通用手机断点 token。
 $bp-mobile: 375px;
 $bp-mobile-s: 359px;
 $bp-tablet: 600px;
 
-// ---- 复用渐变 ----
-$grad-primary: linear-gradient(118deg, var(--cyan) 0%, $mint 46%, var(--lime) 100%);
-$grad-code: linear-gradient(118deg, $white 5%, var(--cyan) 55%, var(--lime) 100%);
-$grad-cta: linear-gradient(118deg, var(--cyan), var(--lime));
-$grad-word: linear-gradient(120deg, var(--cyan), var(--lime));
-$grad-brand: linear-gradient(120deg, var(--cyan) 10%, var(--lime) 90%);
-$grad-count: linear-gradient(150deg, $white, var(--cyan) 46%, var(--lime));
+// =============================================================================
+// 主题令牌表
+// =============================================================================
 
-// ---- 主题 token 表 → :root ----
-// 保留全部 CSS 自定义属性（--cyan 等），运行时仍可由 JS/主题层覆盖。
-$theme-tokens: (
-  '--bg-0': $bg-0,
-  '--bg-1': $bg-1,
-  '--panel': $panel,
-  '--panel-soft': $panel-soft,
-  '--line': $line,
-  '--line-strong': $line-strong,
-  '--text': $text,
-  '--muted': $muted,
-  '--dim': $dim,
-  '--cyan': $cyan,
-  '--lime': $lime,
-  '--pink': $pink,
-  '--warn': $warn,
+// ---- 两套主题都相同、无需重复输出的令牌 ----
+$shared-tokens: (
   '--radius-l': $radius-l,
   '--radius-m': $radius-m,
   '--radius-s': $radius-s,
-  '--shadow': $shadow,
 );
 
-:root {
-  @each $name, $value in $theme-tokens {
+// ---- 深色令牌（= 迁移前 :root 的字面值，零回归基线）----
+$theme-dark: (
+  // 底色 / 面板 / 描边
+  '--bg-0': #070b14,
+  '--bg-1': #0a1220,
+  '--bg-mid': #091120,
+  '--bg-deep': #060a12,
+  '--panel': rgba(17, 28, 47, 0.72),
+  '--panel-soft': rgba(255, 255, 255, 0.05),
+  '--panel-strong': rgba(9, 17, 31, 0.72),
+  '--line': rgba(140, 170, 215, 0.16),
+  '--line-strong': rgba(140, 170, 215, 0.32),
+  '--line-faint': rgba(140, 170, 215, 0.14),
+  '--sep-ink': rgba(140, 170, 215, 0.32),
+
+  // 文本
+  '--text': #eef4ff,
+  '--muted': #94a6c4,
+  '--dim': #6c7f9e,
+
+  // 品牌色（深色下即霓虹原色；浅色下压深成可读文字色）
+  '--cyan': #3ee6d6,
+  '--lime': #d8ff5c,
+  '--pink': #ff7ab6,
+  '--warn': #ffb454,
+
+  // 全局阴影
+  '--shadow': 0 22px 48px -24px rgba(0, 0, 0, 0.9),
+
+  // body 三层径向氛围光 + 线性底色（--bg-mid / --bg-deep 见上）
+  '--bg-wash-cyan': rgba(62, 230, 214, 0.18),
+  '--bg-wash-lime': rgba(216, 255, 92, 0.12),
+  '--bg-wash-indigo': rgba(78, 108, 255, 0.2),
+
+  // 网格纹理 / 选区
+  '--grid-line': rgba(255, 255, 255, 0.022),
+  '--selection-bg': rgba(62, 230, 214, 0.35),
+  '--selection-fg': #04121a,
+
+  // 面板面上的白色高光渐变（.card / .player / .reveal__card）
+  '--card-grad-a': rgba(255, 255, 255, 0.075),
+  '--card-grad-b': rgba(255, 255, 255, 0.025),
+  '--player-grad-a': rgba(255, 255, 255, 0.07),
+  '--player-grad-b': rgba(255, 255, 255, 0.02),
+  '--reveal-card-grad-a': rgba(255, 255, 255, 0.09),
+  '--reveal-card-grad-b': rgba(255, 255, 255, 0.02),
+
+  // 控件面（幽灵按钮/退出按钮/逐轮行/历史胶囊/统计块/导出预览/空位）
+  '--surface-control': rgba(255, 255, 255, 0.055),
+  '--ghost-hover-line': rgba(62, 230, 214, 0.4),
+  '--ghost-hover-bg': rgba(62, 230, 214, 0.08),
+  '--surface-control-weak': rgba(255, 255, 255, 0.045),
+  '--surface-faint': rgba(255, 255, 255, 0.04),
+  '--surface-empty': rgba(255, 255, 255, 0.02),
+
+  // 输入框
+  '--input-bg': rgba(5, 10, 20, 0.62),
+  '--input-bg-focus': rgba(5, 12, 24, 0.85),
+  '--input-focus-line': rgba(62, 230, 214, 0.65),
+  '--input-focus-halo': rgba(62, 230, 214, 0.14),
+
+  // 进度条轨道 / 忙态转圈轨道 / 浮层按钮底 / toast 底
+  '--track-bg': rgba(255, 255, 255, 0.08),
+  '--spinner-track': rgba(255, 255, 255, 0.2),
+  '--fab-bg': rgba(9, 17, 30, 0.78),
+  '--toast-bg': rgba(10, 18, 32, 0.94),
+  '--shadow-toast': 0 20px 44px -18px rgba(0, 0, 0, 0.95),
+
+  // 倒计时遮罩
+  '--countdown-scrim-a': rgba(16, 34, 58, 0.78),
+  '--countdown-scrim-b': rgba(4, 8, 16, 0.95),
+
+  // 亮色填充（渐变按钮 / 头像 / 词胶囊 / 同意按钮 / 断网条）
+  '--fill-cyan': #3ee6d6,
+  '--fill-mint': #79f0b4,
+  '--fill-lime': #d8ff5c,
+  '--fill-lime-soft': #ffe98a,
+  '--fill-pink': #ff7ab6,
+  '--fill-warn': #ffb454,
+  '--fill-warn-soft': #ffce6a,
+  '--fill-danger': #ff5f6d,
+
+  // 渐变文字三段色（品牌字 / 房间码 / 倒计时数字 / 判词 / 结算标题）
+  '--brand-grad-a': #ffffff,
+  '--brand-grad-b': #3ee6d6,
+  '--brand-grad-c': #d8ff5c,
+
+  // 首页 kicker / 玩法序号
+  '--kicker-line': rgba(216, 255, 92, 0.28),
+  '--kicker-bg': rgba(216, 255, 92, 0.08),
+  '--step-n-bg': rgba(62, 230, 214, 0.1),
+  '--step-n-line': rgba(62, 230, 214, 0.25),
+
+  // 玩家卡（自己）
+  '--you-line': rgba(62, 230, 214, 0.42),
+  '--you-inset': rgba(62, 230, 214, 0.08),
+  '--card-you-line': rgba(62, 230, 214, 0.34),
+
+  // 判词（非胜利态，普通文本色）
+  '--verdict-ink': #d7e7ff,
+
+  // 提示条
+  '--tip-line': rgba(62, 230, 214, 0.18),
+  '--tip-bg': rgba(62, 230, 214, 0.07),
+  '--tip-ink': #c9f6f1,
+  '--tip-win-line': rgba(216, 255, 92, 0.3),
+  '--tip-win-bg': rgba(216, 255, 92, 0.08),
+  '--tip-win-ink': #f0ffcf,
+
+  // 徽章
+  '--badge-cyan-bg': rgba(62, 230, 214, 0.12),
+  '--badge-cyan-line': rgba(62, 230, 214, 0.28),
+  '--badge-lime-bg': rgba(216, 255, 92, 0.1),
+  '--badge-lime-line': rgba(216, 255, 92, 0.3),
+  '--badge-ready-bg': rgba(216, 255, 92, 0.12),
+
+  // 联想依据卡
+  '--basis-line': rgba(62, 230, 214, 0.22),
+  '--basis-grad-a': rgba(62, 230, 214, 0.13),
+  '--basis-grad-b': rgba(216, 255, 92, 0.05),
+  '--basis-base': rgba(8, 16, 30, 0.6),
+
+  // 胜利（揭晓翻牌 / 逐轮行 / 历史 / 同意词区）
+  '--win-line': rgba(216, 255, 92, 0.5),
+  '--win-grad-a': rgba(216, 255, 92, 0.16),
+  '--win-grad-b': rgba(62, 230, 214, 0.06),
+  '--win-line-soft': rgba(216, 255, 92, 0.34),
+  '--win-line-row': rgba(216, 255, 92, 0.36),
+  '--win-tint': rgba(216, 255, 92, 0.07),
+  '--agree-bg': rgba(216, 255, 92, 0.055),
+
+  // 霓虹投影
+  '--glow-cyan': rgba(62, 230, 214, 0.85),
+  '--glow-cyan-strong': rgba(62, 230, 214, 0.9),
+  '--glow-cyan-soft': rgba(62, 230, 214, 0.28),
+  '--glow-cyan-code': rgba(62, 230, 214, 0.22),
+  '--glow-cyan-count': rgba(62, 230, 214, 0.32),
+  '--glow-dot': rgba(62, 230, 214, 0.9),
+  '--glow-lime': rgba(216, 255, 92, 0.9),
+  '--glow-lime-word': rgba(216, 255, 92, 0.35),
+  '--glow-lime-verdict': rgba(216, 255, 92, 0.25),
+  '--glow-pink': rgba(255, 122, 182, 0.8),
+);
+
+// ---- 浅色令牌（浅灰蓝底 + 白色半透明玻璃面 + 深色文字；品牌色压深）----
+$theme-light: (
+  // 底色 / 面板 / 描边
+  '--bg-0': #f4f7fc,
+  '--bg-1': #eef3fa,
+  '--bg-mid': #eef3fb,
+  '--bg-deep': #e6edf9,
+  '--panel': rgba(255, 255, 255, 0.78),
+  '--panel-soft': rgba(15, 27, 45, 0.05),
+  '--panel-strong': rgba(255, 255, 255, 0.92),
+  '--line': rgba(23, 48, 84, 0.16),
+  '--line-strong': rgba(23, 48, 84, 0.3),
+  '--line-faint': rgba(23, 48, 84, 0.14),
+  '--sep-ink': #566885,
+
+  // 文本（正文 16:1 / 次要 6.3:1 / 弱化 5.1~5.6:1，均对最亮的玻璃面也 ≥ 4.5）
+  '--text': #0f1c2e,
+  '--muted': #4a5d78,
+  '--dim': #566885,
+
+  // 品牌色：浅底上压深（对白玻璃面 5.3~6.7:1）；填充色见 --fill-*
+  '--cyan': #0a6d63,
+  '--lime': #4f6200,
+  '--pink': #b02a61,
+  '--warn': #8a4b00,
+
+  // 全局阴影（浅色要轻，避免脏灰边）
+  '--shadow': 0 22px 48px -24px rgba(20, 45, 80, 0.22),
+
+  // 氛围光：浅色下压成低透明度水洗，保持「浅灰蓝」而不是白屏
+  '--bg-wash-cyan': rgba(18, 168, 155, 0.1),
+  '--bg-wash-lime': rgba(195, 233, 74, 0.18),
+  '--bg-wash-indigo': rgba(78, 108, 255, 0.08),
+
+  // 网格纹理 / 选区
+  '--grid-line': rgba(15, 27, 45, 0.045),
+  '--selection-bg': rgba(18, 168, 155, 0.3),
+  '--selection-fg': #04121a,
+
+  // 面板面的高光渐变：白色玻璃
+  '--card-grad-a': rgba(255, 255, 255, 0.86),
+  '--card-grad-b': rgba(255, 255, 255, 0.62),
+  '--player-grad-a': rgba(255, 255, 255, 0.82),
+  '--player-grad-b': rgba(255, 255, 255, 0.55),
+  '--reveal-card-grad-a': rgba(255, 255, 255, 0.95),
+  '--reveal-card-grad-b': rgba(255, 255, 255, 0.7),
+
+  // 控件面：白色玻璃 + 浅蓝灰「行填充」让列表/统计块从卡面上浮出来
+  '--surface-control': rgba(255, 255, 255, 0.72),
+  '--ghost-hover-line': rgba(18, 168, 155, 0.45),
+  '--ghost-hover-bg': rgba(18, 168, 155, 0.1),
+  '--surface-control-weak': rgba(219, 230, 244, 0.55),
+  '--surface-faint': rgba(225, 235, 247, 0.5),
+  '--surface-empty': rgba(219, 230, 244, 0.35),
+
+  // 输入框：白底 + 深青聚焦描边
+  '--input-bg': rgba(255, 255, 255, 0.9),
+  '--input-bg-focus': #ffffff,
+  '--input-focus-line': rgba(10, 114, 104, 0.55),
+  '--input-focus-halo': rgba(18, 168, 155, 0.18),
+
+  // 轨道 / 浮层按钮 / toast
+  '--track-bg': rgba(23, 48, 84, 0.12),
+  '--spinner-track': rgba(15, 27, 45, 0.2),
+  '--fab-bg': rgba(255, 255, 255, 0.8),
+  '--toast-bg': rgba(255, 255, 255, 0.96),
+  '--shadow-toast': 0 18px 40px -20px rgba(20, 45, 80, 0.3),
+
+  // 倒计时遮罩：浅色纱幕（数字用深色渐变，见 --brand-grad-*）
+  '--countdown-scrim-a': rgba(244, 247, 252, 0.86),
+  '--countdown-scrim-b': rgba(226, 234, 246, 0.94),
+
+  // 亮色填充：保持亮度，让深色墨字 ≥ 4.5:1（主按钮最暗端 #12a89b 对墨字 6.3:1）
+  '--fill-cyan': #12a89b,
+  '--fill-mint': #5fd39b,
+  '--fill-lime': #c3e94a,
+  '--fill-lime-soft': #e4f07e,
+  '--fill-pink': #e8619b,
+  '--fill-warn': #e09a3a,
+  '--fill-warn-soft': #f5c46a,
+  '--fill-danger': #e8505e,
+
+  // 渐变文字三段色：浅底上压深（对 --bg-0 分别 7.4 / 5.4 / 6.4:1）
+  '--brand-grad-a': #0e5b56,
+  '--brand-grad-b': #0a7268,
+  '--brand-grad-c': #4f6200,
+
+  // 首页 kicker / 玩法序号
+  '--kicker-line': rgba(79, 98, 0, 0.32),
+  '--kicker-bg': rgba(195, 233, 74, 0.2),
+  '--step-n-bg': rgba(18, 168, 155, 0.12),
+  '--step-n-line': rgba(18, 168, 155, 0.34),
+
+  // 玩家卡（自己）
+  '--you-line': rgba(18, 168, 155, 0.45),
+  '--you-inset': rgba(18, 168, 155, 0.1),
+  '--card-you-line': rgba(18, 168, 155, 0.36),
+
+  // 判词（非胜利态，普通文本色）
+  '--verdict-ink': #233245,
+
+  // 提示条（深青字 #0b3d39 / 深橄榄字 #2c3a00 保证 10:1 以上）
+  '--tip-line': rgba(18, 168, 155, 0.22),
+  '--tip-bg': rgba(18, 168, 155, 0.09),
+  '--tip-ink': #0b3d39,
+  '--tip-win-line': rgba(79, 98, 0, 0.3),
+  '--tip-win-bg': rgba(195, 233, 74, 0.16),
+  '--tip-win-ink': #2c3a00,
+
+  // 徽章
+  '--badge-cyan-bg': rgba(18, 168, 155, 0.13),
+  '--badge-cyan-line': rgba(18, 168, 155, 0.3),
+  '--badge-lime-bg': rgba(195, 233, 74, 0.22),
+  '--badge-lime-line': rgba(79, 98, 0, 0.32),
+  '--badge-ready-bg': rgba(195, 233, 74, 0.26),
+
+  // 联想依据卡
+  '--basis-line': rgba(18, 168, 155, 0.26),
+  '--basis-grad-a': rgba(18, 168, 155, 0.12),
+  '--basis-grad-b': rgba(195, 233, 74, 0.08),
+  '--basis-base': rgba(255, 255, 255, 0.72),
+
+  // 胜利（揭晓翻牌 / 逐轮行 / 历史 / 同意词区）
+  '--win-line': rgba(79, 98, 0, 0.45),
+  '--win-grad-a': rgba(195, 233, 74, 0.2),
+  '--win-grad-b': rgba(18, 168, 155, 0.08),
+  '--win-line-soft': rgba(79, 98, 0, 0.34),
+  '--win-line-row': rgba(79, 98, 0, 0.36),
+  '--win-tint': rgba(195, 233, 74, 0.12),
+  '--agree-bg': rgba(195, 233, 74, 0.1),
+
+  // 投影：低饱和同色，避免浅色页面上出现霓虹脏边
+  '--glow-cyan': rgba(18, 168, 155, 0.3),
+  '--glow-cyan-strong': rgba(18, 168, 155, 0.34),
+  '--glow-cyan-soft': rgba(10, 114, 104, 0.16),
+  '--glow-cyan-code': rgba(10, 114, 104, 0.14),
+  '--glow-cyan-count': rgba(10, 114, 104, 0.18),
+  '--glow-dot': rgba(18, 168, 155, 0.45),
+  '--glow-lime': rgba(95, 110, 0, 0.28),
+  '--glow-lime-word': rgba(95, 110, 0, 0.2),
+  '--glow-lime-verdict': rgba(95, 110, 0, 0.16),
+  '--glow-pink': rgba(176, 42, 97, 0.28),
+);
+
+// ---- 令牌输出 ----
+@mixin emit-tokens($tokens) {
+  @each $name, $value in $tokens {
     #{$name}: #{$value};
   }
+}
 
+// 浅色令牌块（显式选择器 + 无 JS 系统兜底，共享同一份 map）
+@mixin theme-light {
+  @include emit-tokens($theme-light);
+  color-scheme: light;
+}
+
+:root {
+  @include emit-tokens($shared-tokens);
+  @include emit-tokens($theme-dark);
   // 字体栈以「带引号字符串」插值，保留 "Segoe UI" 等家族的引号
   --font: #{$font};
+  // 深色为默认（也是无 JS 的兜底）；浅色选择器会覆盖成 light
+  color-scheme: dark;
 }
+
+// 用户显式选择明亮（或系统明亮且 JS 已写入 data-theme=light）
+:root[data-theme='light'] {
+  @include theme-light;
+}
+
+// 无 JS 兜底：没有 data-theme 且系统偏好明亮时走浅色令牌
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    @include theme-light;
+  }
+}
+
+// =============================================================================
+// 复用渐变（全部引用主题令牌，深浅主题各自解析；深色下与迁移前逐值等价）
+// =============================================================================
+$grad-primary: linear-gradient(118deg, var(--fill-cyan) 0%, var(--fill-mint) 46%, var(--fill-lime) 100%);
+$grad-code: linear-gradient(118deg, var(--brand-grad-a) 5%, var(--brand-grad-b) 55%, var(--brand-grad-c) 100%);
+$grad-cta: linear-gradient(118deg, var(--brand-grad-b), var(--brand-grad-c));
+$grad-word: linear-gradient(120deg, var(--fill-cyan), var(--fill-lime));
+$grad-brand: linear-gradient(120deg, var(--brand-grad-b) 10%, var(--brand-grad-c) 90%);
+$grad-count: linear-gradient(150deg, var(--brand-grad-a), var(--brand-grad-b) 46%, var(--brand-grad-c));

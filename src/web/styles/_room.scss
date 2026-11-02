@@ -1,6 +1,7 @@
 // =============================================================================
 // 房间页：房间码卡片、玩家列表、徽章、连接圆点、提示条
 // 对应 public/style.css 第 415–628 行
+// 颜色走主题令牌：玩家卡 --player-grad-* / 徽章 --badge-* / 提示条 --tip-*。
 // =============================================================================
 
 @use 'sass:map';
@@ -26,7 +27,7 @@
     line-height: 1.05;
     letter-spacing: 0.16em;
     padding-left: 0.16em;
-    @include gradient-text($grad-code, 0 10px 30px rgba($cyan, 0.22));
+    @include gradient-text($grad-code, 0 10px 30px var(--glow-cyan-code));
   }
 }
 
@@ -46,21 +47,21 @@
   padding: 18px 10px 14px;
   border-radius: $radius-card;
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba($white, 0.07), rgba($white, 0.02));
+  background: linear-gradient(180deg, var(--player-grad-a), var(--player-grad-b));
   text-align: center;
 
   // 自己：青色描边 + 内发光
   &--you {
-    border-color: rgba($cyan, 0.42);
-    box-shadow: inset 0 0 0 1px rgba($cyan, 0.08),
-      0 16px 36px -28px rgba($cyan, 0.9);
+    border-color: var(--you-line);
+    box-shadow: inset 0 0 0 1px var(--you-inset),
+      0 16px 36px -28px var(--glow-cyan-strong);
   }
 
   // 空位：虚线框
   &--empty {
     border-style: dashed;
     border-color: var(--line-strong);
-    background: rgba($white, 0.02);
+    background: var(--surface-empty);
   }
 
   &__avatar {
@@ -72,15 +73,15 @@
     font-size: 20px;
     font-weight: 800;
     color: $ink;
-    background: linear-gradient(135deg, var(--cyan), var(--lime));
-    box-shadow: 0 8px 22px -12px rgba($cyan, 0.9);
+    background: linear-gradient(135deg, var(--fill-cyan), var(--fill-lime));
+    box-shadow: 0 8px 22px -12px var(--glow-cyan-strong);
   }
 
   // B 位玩家：粉→橙头像
   &--b {
     .player__avatar {
-      background: linear-gradient(135deg, var(--pink), var(--warn));
-      box-shadow: 0 8px 22px -12px rgba($pink, 0.8);
+      background: linear-gradient(135deg, var(--fill-pink), var(--fill-warn));
+      box-shadow: 0 8px 22px -12px var(--glow-pink);
     }
   }
 
@@ -88,7 +89,7 @@
   &--empty {
     .player__avatar {
       color: var(--dim);
-      background: rgba($white, 0.04);
+      background: var(--surface-faint);
       border: 1px dashed var(--line-strong);
       box-shadow: none;
       font-size: 22px;
@@ -140,17 +141,17 @@
 $badge-variants: (
   'lime': (
     color: var(--lime),
-    bg: rgba($lime, 0.1),
-    border: rgba($lime, 0.3),
+    bg: var(--badge-lime-bg),
+    border: var(--badge-lime-line),
   ),
   'ready': (
     color: var(--lime),
-    bg: rgba($lime, 0.12),
-    border: rgba($lime, 0.34),
+    bg: var(--badge-ready-bg),
+    border: var(--win-line-soft),
   ),
   'muted': (
     color: var(--dim),
-    bg: rgba($white, 0.04),
+    bg: var(--surface-faint),
     border: var(--line),
   ),
 );
@@ -162,8 +163,8 @@ $badge-variants: (
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--cyan);
-  background: rgba($cyan, 0.12);
-  border: 1px solid rgba($cyan, 0.28);
+  background: var(--badge-cyan-bg);
+  border: 1px solid var(--badge-cyan-line);
 
   @each $name, $tokens in $badge-variants {
     &--#{$name} {
@@ -196,9 +197,9 @@ $badge-variants: (
   margin: 0;
   padding: 14px 16px;
   border-radius: $radius-m;
-  border: 1px solid rgba($cyan, 0.18);
-  background: rgba($cyan, 0.07);
-  color: $tip-ink;
+  border: 1px solid var(--tip-line);
+  background: var(--tip-bg);
+  color: var(--tip-ink);
   font-size: 13px;
   line-height: 1.55;
 
@@ -208,8 +209,8 @@ $badge-variants: (
   }
 
   &--win {
-    border-color: rgba($lime, 0.3);
-    background: rgba($lime, 0.08);
-    color: $tip-win-ink;
+    border-color: var(--tip-win-line);
+    background: var(--tip-win-bg);
+    color: var(--tip-win-ink);
   }
 }

@@ -57,8 +57,8 @@
   }
 }
 
-// 呼吸光晕：霓虹小圆点（.dot）
-@mixin neon-dot($color: var(--cyan), $glow: 0 0 8px rgba(62, 230, 214, 0.9)) {
+// 呼吸光晕：霓虹小圆点（.dot）；光晕走 --glow-dot，浅色下自动换成低饱和投影
+@mixin neon-dot($color: var(--cyan), $glow: 0 0 8px var(--glow-dot)) {
   background: $color;
   box-shadow: $glow;
 }

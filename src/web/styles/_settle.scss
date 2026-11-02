@@ -1,6 +1,7 @@
 // =============================================================================
 // 结算页：通关卡片、逐轮记录、统计、操作区、导出预览、历史
 // 对应 public/style.css 第 1006–1286 行
+// 面板类表面走 --surface-*，胜利行/历史走 --win-*（浅色下压深），词胶囊走 --fill-*。
 // =============================================================================
 
 @use 'variables' as *;
@@ -51,7 +52,7 @@
   // B 位玩家：粉→橙
   &--b {
     color: $ink-pink;
-    background: linear-gradient(120deg, var(--pink), var(--warn));
+    background: linear-gradient(120deg, var(--fill-pink), var(--fill-warn));
   }
 }
 
@@ -103,7 +104,7 @@
   min-width: 0;
   border-radius: var(--radius-s);
   border: 1px solid var(--line);
-  background: rgba($white, 0.045);
+  background: var(--surface-control-weak);
   font-size: 13px;
   color: var(--muted);
   animation: viewIn 0.3s ease both;
@@ -151,8 +152,8 @@
   }
 
   &--win {
-    border-color: rgba($lime, 0.34);
-    background: rgba($lime, 0.07);
+    border-color: var(--win-line-soft);
+    background: var(--win-tint);
 
     .settle-round__flag {
       color: var(--lime);
@@ -171,7 +172,7 @@
   padding: 12px 14px;
   border-radius: var(--radius-s);
   border: 1px solid var(--line);
-  background: rgba($white, 0.04);
+  background: var(--surface-faint);
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--muted);
@@ -199,7 +200,7 @@
   padding: 10px;
   border-radius: var(--radius-m);
   border: 1px solid var(--line);
-  background: rgba($white, 0.04);
+  background: var(--surface-faint);
 
   &:empty {
     display: none;
@@ -268,14 +269,14 @@
     padding: 7px 11px;
     border-radius: $radius-pill;
     border: 1px solid var(--line);
-    background: rgba($white, 0.045);
+    background: var(--surface-control-weak);
     font-size: 11.5px;
     color: var(--muted);
     animation: viewIn 0.3s ease both;
 
     &--win {
-      border-color: rgba($lime, 0.36);
-      background: rgba($lime, 0.07);
+      border-color: var(--win-line-row);
+      background: var(--win-tint);
       color: var(--lime);
 
       .history__round,

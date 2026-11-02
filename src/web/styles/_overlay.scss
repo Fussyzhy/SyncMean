@@ -1,6 +1,7 @@
 // =============================================================================
-// 覆盖层：3-2-1 倒计时、toast、断网横幅、音效开关、撒花
+// 覆盖层：3-2-1 倒计时、toast、断网横幅、音效开关、主题切换、撒花
 // 对应 public/style.css 第 1288–1464 行
+// 颜色走主题令牌：遮罩 --countdown-scrim-* / toast --toast-bg / 浮层按钮 --fab-bg。
 // =============================================================================
 
 @use 'variables' as *;
@@ -14,7 +15,7 @@
   display: none;
   place-items: center;
   background:
-    radial-gradient(circle at 50% 42%, rgba(16, 34, 58, 0.78), rgba(4, 8, 16, 0.95));
+    radial-gradient(circle at 50% 42%, var(--countdown-scrim-a), var(--countdown-scrim-b));
   @include frosted(9px);
 
   &.is-on {
@@ -31,7 +32,7 @@
     font-weight: 900;
     line-height: 1;
     letter-spacing: -0.03em;
-    @include gradient-text($grad-count, 0 16px 48px rgba($cyan, 0.32));
+    @include gradient-text($grad-count, 0 16px 48px var(--glow-cyan-count));
 
     // 每秒重放的弹跳（由 JS 重新挂 class 触发）
     &--pulse {
@@ -59,13 +60,13 @@
   padding: 12px 20px;
   border-radius: $radius-pill;
   border: 1px solid var(--line-strong);
-  background: rgba(10, 18, 32, 0.94);
+  background: var(--toast-bg);
   color: var(--text);
   font-size: 13.5px;
   font-weight: 600;
   line-height: 1.4;
   text-align: center;
-  box-shadow: 0 20px 44px -18px rgba(0, 0, 0, 0.95);
+  box-shadow: var(--shadow-toast);
   @include frosted(10px);
   opacity: 0;
   transform: translate(-50%, 18px);
@@ -100,7 +101,7 @@
   font-weight: 700;
   text-align: center;
   color: $ink-warn;
-  background: linear-gradient(90deg, $warn, $warn-soft);
+  background: linear-gradient(90deg, var(--fill-warn), var(--fill-warn-soft));
   transform: translateY(-100%);
   transition: transform 0.24s ease;
 
@@ -121,11 +122,47 @@
   place-items: center;
   border-radius: 50%;
   border: 1px solid var(--line);
-  background: rgba(9, 17, 30, 0.78);
+  background: var(--fab-bg);
   color: var(--text);
   font-size: 17px;
   line-height: 1;
   cursor: pointer;
+  @include frosted(10px);
+  transition: transform 0.15s ease, border-color 0.2s ease;
+  touch-action: manipulation;
+
+  &:active {
+    transform: scale(0.94);
+  }
+
+  &:focus-visible {
+    @include focus-ring();
+  }
+}
+
+// ---- 主题切换（#btn-theme）----
+// 契约：与 .sound 同尺寸（44×44）/同 z-index（70）/同 top，固定在其左侧 8px。
+//   .sound  right: max(16px, calc(50% - 296px))
+//   .theme  right: max(68px, calc(50% - 244px))  → 两者右边界差 52px = 44 + 8
+// 375px 及更窄：两个 max() 都落到 16/68px 静态值，间距仍是 8px，且右边界 ≥ 16px 不溢出。
+.theme {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top, 0px));
+  right: max(68px, calc(50% - 244px));
+  z-index: 70;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--fab-bg);
+  color: var(--text);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+  appearance: none;
   @include frosted(10px);
   transition: transform 0.15s ease, border-color 0.2s ease;
   touch-action: manipulation;

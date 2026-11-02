@@ -1,6 +1,7 @@
 // =============================================================================
 // 揭晓：翻牌舞台、判词、下一轮提示、同意词投票区
 // 对应 public/style.css 第 808–1004 行
+// 颜色走主题令牌：面板 --panel-strong / 胜利 --win-* / 判词 --verdict-ink。
 // =============================================================================
 
 @use 'variables' as *;
@@ -10,7 +11,7 @@
   display: none;
   padding: 18px;
   @include panel(var(--radius-l));
-  background: rgba(9, 17, 31, 0.72);
+  background: var(--panel-strong);
   animation: viewIn 0.3s ease both;
 
   &.is-on {
@@ -30,7 +31,7 @@
     padding: 16px 10px 12px;
     border-radius: $radius-card;
     border: 1px solid var(--line);
-    background: linear-gradient(165deg, rgba($white, 0.09), rgba($white, 0.02));
+    background: linear-gradient(165deg, var(--reveal-card-grad-a), var(--reveal-card-grad-b));
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -41,7 +42,7 @@
     backface-visibility: hidden;
 
     &--you {
-      border-color: rgba($cyan, 0.34);
+      border-color: var(--card-you-line);
     }
 
     // 揭晓瞬间的 3D 翻牌
@@ -76,18 +77,18 @@
   // 通关：卡片与词换柠檬黄
   &.is-win {
     .reveal__card {
-      border-color: rgba($lime, 0.5);
-      background: linear-gradient(165deg, rgba($lime, 0.16), rgba($cyan, 0.06));
-      box-shadow: 0 20px 46px -30px rgba($lime, 0.9);
+      border-color: var(--win-line);
+      background: linear-gradient(165deg, var(--win-grad-a), var(--win-grad-b));
+      box-shadow: 0 20px 46px -30px var(--glow-lime);
     }
 
     .reveal__word {
       color: var(--lime);
-      filter: drop-shadow(0 6px 24px rgba($lime, 0.35));
+      filter: drop-shadow(0 6px 24px var(--glow-lime-word));
     }
 
     .verdict {
-      @include gradient-text($grad-cta, 0 6px 22px rgba($lime, 0.25));
+      @include gradient-text($grad-cta, 0 6px 22px var(--glow-lime-verdict));
     }
   }
 
@@ -103,7 +104,7 @@
   font-size: 19px;
   font-weight: 900;
   letter-spacing: 0.01em;
-  color: $verdict-ink;
+  color: var(--verdict-ink);
   line-height: 1.4;
 
   &--pop {
@@ -125,8 +126,8 @@
   margin-top: 14px;
   padding: 14px;
   border-radius: var(--radius-m);
-  border: 1px dashed rgba($lime, 0.34);
-  background: rgba($lime, 0.055);
+  border: 1px dashed var(--win-line-soft);
+  background: var(--agree-bg);
 
   &.is-on {
     display: block;
@@ -141,11 +142,12 @@
     font-size: 15px;
   }
 
+  // 「同意」态：亮柠檬填充 + 墨字（两套主题通用）
   &__btn--on {
     color: $ink-agree;
     border-color: transparent;
-    background: linear-gradient(118deg, var(--lime), $lime-soft);
-    box-shadow: 0 14px 30px -18px rgba($lime, 0.9);
+    background: linear-gradient(118deg, var(--fill-lime), var(--fill-lime-soft));
+    box-shadow: 0 14px 30px -18px var(--glow-lime);
   }
 
   &__hint {
