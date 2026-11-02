@@ -178,11 +178,37 @@ git pull
 docker compose up -d --build   # 或重新 docker build + docker rm -f 旧容器
 ```
 
-### 6. 国内构建 yarn 慢的话
+### 6. 构建卡在 `yarn install` / 换下载源
+
+**先分清「慢」和「卡死」**：日志里出现 `There appears to be trouble with your network connection. Retrying...` 时，如果它还能继续往前走（`[4/5] Linking dependencies...`、`[5/5] Building fresh packages...`），那就只是网速慢——Yarn 会对每个包超时重试，273 个包在低带宽下走几分钟很正常，等着就行，**不用中断重建**（中断反而重来）。实测一次 459s 的慢构建里，旧 Dockerfile 的 `[builder 5/8]` 与 `[runtime 5/6]` 两条 `yarn install` 是**并行**各拉一遍依赖，互相抢带宽，各自 440s 左右。真正卡死（超过 10 分钟毫无推进）才按下面排查。
+
+**为什么会这样**：`yarn.lock` 里每个包的 `resolved` 都写死了绝对下载地址（本仓库是 `registry.npmmirror.com`）。Yarn 1 会优先按 lockfile 的 `resolved` 下载，所以 `yarn config set registry` 对已锁定的包**无效**——容器实际还是去 lockfile 写死的那个域名拉包。因此构建快慢取决于**构建机到那个域名的速度**：国内机器用 npmmirror 快，海外机器用官方源快。
+
+现在 `Dockerfile` 已经处理：默认用 npmmirror（与锁文件一致），并按 `YARN_REGISTRY` 重写锁文件，换源真正生效；同时把超时放宽到 5 分钟（`YARN_NETWORK_TIMEOUT` 可调），并且**只有 builder 阶段联网一次**，runtime 阶段完全离线（生产依赖从构建缓存离线装好再拷进去）。
+
+换官方源（构建机在海外时）：
 
 ```bash
-docker build --build-arg YARN_REGISTRY=https://registry.npmmirror.com -t syncmean:latest .
+docker build --build-arg YARN_REGISTRY=https://registry.npmjs.org -t syncmean:latest .
 ```
+
+首次构建要下载全部依赖（几分钟到十几分钟都算正常）；**之后只改代码再构建会命中 `yarn install` 的层缓存，不会重新下载**。
+
+还是卡的话，按顺序排查（都是容器内网络问题）：
+
+```bash
+# 1) 容器内 DNS 是否能解析
+docker run --rm node:22-alpine sh -c "getent hosts registry.npmmirror.com || echo DNS-FAIL"
+
+# 2) 容器内 HTTPS 能否拉包（能打印 200 就说明网络没问题）
+docker run --rm node:22-alpine node -e "fetch('https://registry.npmmirror.com/express').then(r=>console.log('HTTP',r.status)).catch(e=>console.error('ERR',e.cause&&e.cause.code||e.message))"
+
+# 3) 看真实错误（不要只看 BuildKit 的进度条）
+docker build --progress=plain --no-cache -t syncmean:latest . 2>&1 | tail -n 120
+```
+
+`1)` 失败 → Docker Desktop 的 DNS 问题：重启 Docker Desktop，或在 Settings → Resources → Network 换 DNS；Linux 宿主可给 `dockerd` 配 DNS。
+`2)` 失败但 1) 正常 → 多半是代理/VPN：Docker Desktop 在 Settings → Resources → Proxies 配置代理，或构建时传 `--build-arg HTTP_PROXY=... --build-arg HTTPS_PROXY=...`；Linux 宿主可用 `docker build --network=host`。
 
 ### 7. 不想用 Docker
 
