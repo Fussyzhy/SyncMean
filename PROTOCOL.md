@@ -1,6 +1,11 @@
-# 同声传意 · 联机版 —— 协议契约 v3.4（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3.5（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3.5 变更（相对 v3.4）**：新增**管理后台 `/admin`**（独立 Socket.IO namespace `/admin`），玩家协议、玩家事件、`PublicRoomState` 与既有 DOM id **零变化**：
+> 1. 管理后台用 `ADMIN_KEY` 鉴权（本地 `.env` / 进程环境变量），独立 namespace `/admin`，握手 `auth:{key}`；管理员 socket 不进入任何房间频道，观战与终止房间都不影响玩家对局协议。
+> 2. 实时房间列表（`admin:rooms` 推送 + `admin:rooms:request` 主动拉取）、实时观战（`admin:room:watch` → `admin:room:state`）、终止删除房间（`admin:room:delete` → 玩家收到既有 `room:error {code:'ROOM_DELETED'}`）。
+> 3. 类型定义在 `src/shared/admin.ts`（§14 的 TypeScript 映射）。新增 `.env.example`（模板）与 `.env`（gitignore）。新增管理后台 DOM id（见 §9/§14）与 `yarn verify:admin` 浏览器验收。
 >
 > **v3.4 变更（相对 v3.3）**：新增两个客户端事件，其余下发字段零变化：
 > 1. **快捷表情 `room:emote`**：仅 `submitting` 阶段可用，只允许预设白名单 `nudge` / `thinking` / `cheer`（**不接受自由文本**，避免变成双盲暗示通道）。服务端按 8s 冷却限流，把预设文案以 `room:notice {kind:'info'}` 定向发给对方；ack 返回 `{ok:true, accepted:boolean}`（冷却/对方离线时 `accepted:false`）。新增错误码 `INVALID_EMOTE`。
@@ -459,3 +464,89 @@ lobby --(双方都 restart 后，前端自动 player:ready)--> 双方 ready → 
 - **`<meta name="theme-color">`**：取当前主题下 `--bg-0` 的计算值（配色只在 SCSS 定义，TS 不复制调色板）。
 - **CSS 侧约定**：`:root` 输出深色令牌；浅色令牌同时挂在 `:root[data-theme='light']` 与 `@media (prefers-color-scheme: light) { :root:not([data-theme]) }`（无 JS 时也能按系统走）；两套主题各自声明 `color-scheme`。
 - **导出 PNG 不受主题影响**：始终使用 §11 的深色霓虹版式，保证分享图品牌一致。
+
+## 14. 管理后台契约（v3.5）
+
+### 14.1 定位与安全边界
+
+- **路由**：`GET /admin`（与游戏共用同一份前端产物，服务端 SPA 回落返回 `dist/public/index.html`）。进入页面先显示**密钥门禁**，校验通过且 socket 连上 `/admin` 命名空间后才显示房间列表。
+- **密钥来源**：唯一来源是服务端环境变量 `ADMIN_KEY`（进程环境变量优先，其次项目根目录 `.env`，由 `src/server/env.ts` 读取；模板见 `.env.example`）。**留空 = 管理后台禁用**：任何管理员握手一律被拒绝（`connect_error.message = 'ADMIN_AUTH_FAILED'`），服务端启动日志明确打印「管理后台未配置 ADMIN_KEY」，前端门禁在失败文案里提示检查 `.env`（为避免给攻击者额外的探测信息，禁用态与密钥错误共用同一错误码）。
+- **鉴权方式**：独立 Socket.IO namespace `/admin`（常量 `ADMIN_NAMESPACE`），握手载荷 `auth: { key }`；服务端用**定时安全比较**校验，失败时 `connect_error.message = 'ADMIN_AUTH_FAILED'`；同一 IP 60 秒内失败 ≥ 10 次后返回 `'ADMIN_RATE_LIMITED'`（窗口内即使密钥正确也先拒绝，60 秒后恢复）。限流按握手直连 IP（`handshake.address`）计数；挂在 HTTPS 反代后所有请求共用反代出口 IP，建议同时在反代层做额外访问控制。
+- **隔离性（硬约束）**：管理员 socket **永远不 join 任何 `room_*` 频道**，不占玩家席位、不触发 `room:notice`/`OPPONENT_LEFT`/`room:state` 广播。观战与终止房间对玩家协议只有一处可观察影响：终止房间时玩家收到既有 `room:error {code:'ROOM_DELETED'}`。
+- **密钥落盘**：前端只在 `sessionStorage['321:admin-key']` 保存（刷新免重输、关标签页即失效）；**禁止**写 `localStorage`、URL、DOM 属性或日志。服务端启动日志只打印「管理后台已启用/未配置」，绝不打印密钥。生产环境必须部署在 HTTPS 反代之后。
+- **数据边界**：观战视角与玩家 §5.3 同一原则——`submitted` 只下发布尔值，**揭晓前任何载荷都不得含词**；`result` / `history` 只在揭晓后（`reveal` / 结算快照）才有词。
+- **类型来源**：`src/shared/admin.ts`（本节的 TypeScript 映射，字段名以本文件为准）。
+
+### 14.2 事件（namespace `/admin`）
+
+客户端 → 服务端（都带 ack；失败返回既有 `ActionError`，错误码复用 §5.4，如 `ROOM_NOT_FOUND`）：
+
+| 事件 | 载荷 | ack 成功 |
+| --- | --- | --- |
+| `admin:rooms:request` | `{}` / `{activeOnly?:boolean}`（`activeOnly` 为预留字段，当前忽略） | `ActionResult<{ok:true, rooms:AdminRoomsPayload}>` |
+| `admin:room:watch` | `{code}` | `ActionResult<{ok:true, detail:AdminRoomDetail}>` |
+| `admin:room:unwatch` | `{code}` | `ActionResult<{ok:true}>` |
+| `admin:room:delete` | `{code}` | `ActionResult<{ok:true, code:string}>` |
+
+服务端 → 管理员：
+
+| 事件 | 载荷 | 触发时机 |
+| --- | --- | --- |
+| `admin:rooms` | `AdminRoomsPayload` | 连接成功后立即推一次；之后每 ≤500ms 检查一次，**内容变化才推** |
+| `admin:room:state` | `{code, detail, at}` | 被观战房间内容变化时推（≤500ms 内），同一内容不重复推 |
+| `admin:room:closed` | `{code, reason:'deleted' \| 'expired'}` | 被观战房间被管理员终止/自然清理/玩家走光时推，随后该房间自动移出观战集合 |
+
+`AdminRoomsPayload` / `AdminRoomSummary` / `AdminRoomDetail` 字段见 `src/shared/admin.ts`。补充语义：
+
+- `at` 是**服务端生成时刻**，前端据此换算 deadline 倒计时（手机本地时钟可能不准）。
+- `AdminRoomSummary.phase` 是房间**真实相位**；`settlePending=true` 表示挂着整局结算快照（`lastGame`），前端显示「结算中」。
+- `AdminRoomDetail` 在 `settlePending=true` 时，`round` / `basis` / `result` / `history` 取**快照**值（与玩家 §5.3.1 的 won 视角一致），`submitted` / `agree` 恒为 false，`settleEndedAt` = 快照冻结时刻；否则取实时房间值，`settleEndedAt=null`。
+- `deadline`：`countdown` = 倒计时结束时刻，`submitting` = 提交截止（本房间不限时为 null），其余为 null。
+- 观战是**只读**的：管理后台不得伪造/发送任何玩家事件（`round:submit` 等）。
+
+### 14.3 终止房间语义
+
+`admin:room:delete {code}`：
+
+1. 房间码大写归一后查找；不存在 → `{ok:false, error:'ROOM_NOT_FOUND'}`；格式非法 → `INVALID_CODE`；
+2. 先给房间内**所有在线玩家**定向发 `room:error {code:'ROOM_DELETED', message:'房间已被管理员关闭'}`（玩家前端按既有逻辑 `teardown` 回首页）；
+3. 清计时器、结算快照，把房间从内存删除（无需再广播 `room:state`）；
+4. ack `{ok:true, code}`；所有正在观战该房间的管理员收到 `admin:room:closed {code, reason:'deleted'}`。
+
+### 14.4 管理后台 DOM id（自动化验收用，前端不得改名）
+
+```
+#view-admin           管理后台根容器（<body data-view="admin">）
+#admin-gate           密钥门禁面板（未登录时可见）
+#admin-key-input      密钥输入框（type=password，autocomplete=off）
+#btn-admin-login      「进入」按钮（提交中 disabled / aria-busy=true）
+#admin-gate-error     门禁错误文案（role=alert；密钥错误/限流/未配置/断网均在此）
+#admin-dashboard      登录后的面板
+#admin-status         连接状态文案（已连接 / 连接中… / 已断线，role=status）
+#btn-admin-refresh    手动刷新房间列表
+#btn-admin-logout     退出登录（清 sessionStorage 并断开 socket）
+#admin-room-count     房间数
+#admin-player-count   在线管理面板统计的玩家数
+#admin-room-list      房间列表容器
+#admin-empty           空列表占位文案
+#admin-room-detail    观战详情面板（选中房间后可见）
+#btn-admin-back       返回房间列表
+#admin-detail-code    详情里的房间码
+#admin-room-closed    房间已关闭提示（收到 admin:room:closed 后显示）
+```
+
+列表行/操作按钮是**重复元素**，用 class + `data-code` 定位（不用重复 id）：
+
+```
+.admin-room-card      房间卡片，data-code="ABCD"
+.btn-admin-watch      「观战」按钮，data-code="ABCD"
+.btn-admin-delete     「终止房间」按钮，data-code="ABCD"（二次确认时文案「确认终止？」）
+```
+
+### 14.5 验收标准（追加到 §10）
+
+16. **管理后台（v3.5）**：
+    - `yarn test`：无 key / 错 key 连接被拒（`ADMIN_AUTH_FAILED`）；正确 key 连接成功并收到 `admin:rooms`；房间列表随建房/加入/离开实时更新（≤2s）；`admin:room:watch` ack 返回详情并持续收到 `admin:room:state`；`submitting` 阶段 `submitted` 布尔实时变化且载荷**不含词**，`reveal` 后 `result/history` 含词；`admin:room:delete` 后玩家收到 `ROOM_DELETED`、列表移除、观战方收到 `admin:room:closed`；重复删除返回 `ROOM_NOT_FOUND`；`admin:room:unwatch` 后不再收到该房间的 `admin:room:state`。
+    - `yarn build && yarn start` 后 `GET /admin` 返回 200 且内容是 `dist/public/index.html`（SPA 回落）。
+    - `yarn verify:admin`（真浏览器）：未登录只看到门禁；错误密钥显示错误；正确密钥进入列表；列表出现房间后点「观战」进入实时详情；「终止房间」二次确认后房间从列表消失、观战面板显示已关闭；刷新页面（同一标签页）仍保持登录（sessionStorage）。
+    - **禁用态**：`ADMIN_KEY` 留空起服务时握手返回 `ADMIN_AUTH_FAILED`、启动日志明确提示未配置，`/admin` 门禁提示检查 `.env`，游戏页与 `/health` 不受影响（一次性手验，不强制自动化）。

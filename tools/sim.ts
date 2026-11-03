@@ -10,14 +10,37 @@
 
 import assert from 'node:assert';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { io, type Socket } from 'socket.io-client';
 
 import GameModule, { constants, normalize, type Player, type Room } from '../src/server/game.js';
+import { loadEnvFile, parseEnvText } from '../src/server/env.js';
+import {
+  ADMIN_AUTH_ERROR,
+  ADMIN_NAMESPACE,
+  ADMIN_RATE_LIMIT_ERROR,
+} from '../src/shared/admin.js';
+import type {
+  AdminClientToServerEvents,
+  AdminDeleteOk,
+  AdminDeleteRoomPayload,
+  AdminRoomClosedPayload,
+  AdminRoomDetail,
+  AdminRoomStatePayload,
+  AdminRoomsOk,
+  AdminRoomsRequestPayload,
+  AdminServerToClientEvents,
+  AdminSimpleOk,
+  AdminUnwatchPayload,
+  AdminWatchOk,
+  AdminWatchPayload,
+} from '../src/shared/admin.js';
 import type {
   ActionError,
   ActionResult,
@@ -225,7 +248,8 @@ async function startServer(): Promise<StartedServer> {
     ['--import', 'tsx', path.join(ROOT, 'src/server/index.ts')],
     {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(PORT), NODE_ENV: 'test' },
+      // ADMIN_KEY 显式给测试值：进程环境变量优先于项目根 .env，服务器读到真实密钥也不会让本测试意外通过
+      env: { ...process.env, PORT: String(PORT), NODE_ENV: 'test', ADMIN_KEY: SIM_ADMIN_KEY },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }
@@ -450,6 +474,234 @@ function payloadMentions(payload: unknown, needle: string): boolean {
 
 function hasOwn(obj: unknown, key: string): boolean {
   return Boolean(obj) && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/* ==================== 管理后台（PROTOCOL.md §14）测试工具 ==================== */
+
+/** sim 子进程用的管理密钥（进程环境变量优先，避免读到真实 .env） */
+const SIM_ADMIN_KEY = 'sim-admin-key';
+
+/** 服务端鉴权失败的限流窗口与阈值（与 src/server/admin.ts 保持一致） */
+const ADMIN_FAILURE_WINDOW_MS = 60 * 1000;
+const ADMIN_FAILURE_LIMIT = 10;
+
+type AdminSocket = Socket<AdminServerToClientEvents, AdminClientToServerEvents>;
+
+/** 某个「服务端 → 管理员」事件对应的载荷类型 */
+type AdminServerPayload<E extends keyof AdminServerToClientEvents> = Parameters<
+  AdminServerToClientEvents[E]
+>[0];
+
+interface AdminLogEntry {
+  event: string;
+  payload: unknown;
+  at: number;
+}
+
+interface AdminClient {
+  label: string;
+  socket: AdminSocket;
+  log: AdminLogEntry[];
+  mark(): number;
+  disconnect(): void;
+}
+
+/** 管理员 → 服务端事件的请求载荷类型（供 emitAdminAck 收窄） */
+interface AdminPayloads {
+  'admin:rooms:request': AdminRoomsRequestPayload;
+  'admin:room:watch': AdminWatchPayload;
+  'admin:room:unwatch': AdminUnwatchPayload;
+  'admin:room:delete': AdminDeleteRoomPayload;
+}
+
+/** 管理员 → 服务端事件的 ack 结果类型 */
+interface AdminAckResults {
+  'admin:rooms:request': ActionResult<AdminRoomsOk>;
+  'admin:room:watch': ActionResult<AdminWatchOk>;
+  'admin:room:unwatch': ActionResult<AdminSimpleOk>;
+  'admin:room:delete': ActionResult<AdminDeleteOk>;
+}
+
+const adminClients: AdminClient[] = [];
+
+/**
+ * 我方观测到的「ADMIN_AUTH_FAILED 尝试开始时刻」。
+ * 第 28 步（限流）要据此推算 60s 窗口内已累计多少次失败，避免被前面用例的试错次数影响；
+ * 记录的是**尝试开始**时刻（≤ 服务端记录时刻），用于保守判断某条记录是否一定还在窗口内。
+ */
+const adminAuthFailures: number[] = [];
+
+function createAdminClient(label: string, key: string | null): AdminClient {
+  const socket = io(baseUrl() + ADMIN_NAMESPACE, {
+    // 无 key 用例：auth 里不带 key（服务端 handshake.auth?.key === undefined）
+    auth: key === null ? {} : { key },
+    transports: ['websocket'],
+    forceNew: true,
+    reconnection: false,
+    timeout: 8000,
+  }) as AdminSocket;
+
+  const client: AdminClient = {
+    label,
+    socket,
+    log: [],
+    mark() {
+      return this.log.length;
+    },
+    disconnect() {
+      try {
+        socket.disconnect();
+      } catch {
+        // ignore
+      }
+    },
+  };
+  adminClients.push(client);
+
+  socket.onAny((event: string, ...args: unknown[]) => {
+    const payload: unknown = args.length <= 1 ? args[0] : args;
+    client.log.push({ event, payload, at: Date.now() });
+  });
+
+  return client;
+}
+
+interface AdminConnectOutcome {
+  client: AdminClient;
+  connected: boolean;
+  /** connect_error 的 message（成功时为空串）；超时记为 'TIMEOUT' */
+  errorMessage: string;
+}
+
+/** 等一次管理员握手结果；失败/超时都以可断言的结果返回，不抛异常 */
+function awaitAdminHandshake(client: AdminClient, timeout = 8000): Promise<AdminConnectOutcome> {
+  if (client.socket.connected) {
+    return Promise.resolve({ client, connected: true, errorMessage: '' });
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome: AdminConnectOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => {
+      finish({ client, connected: false, errorMessage: 'TIMEOUT' });
+    }, timeout);
+    client.socket.once('connect', () => {
+      finish({ client, connected: true, errorMessage: '' });
+    });
+    client.socket.once('connect_error', (err: Error) => {
+      finish({
+        client,
+        connected: false,
+        errorMessage: err && typeof err.message === 'string' ? err.message : String(err),
+      });
+    });
+  });
+}
+
+/**
+ * 故意用错误密钥（null = 不带 key）连一次管理员命名空间，返回握手结果并断开。
+ * 期望失败；若服务端返回 ADMIN_AUTH_FAILED，把尝试开始时刻记入 adminAuthFailures。
+ */
+async function adminConnectFailure(
+  label: string,
+  key: string | null
+): Promise<AdminConnectOutcome> {
+  const startedAt = Date.now();
+  const client = createAdminClient(label, key);
+  const outcome = await awaitAdminHandshake(client);
+  if (!outcome.connected && outcome.errorMessage === ADMIN_AUTH_ERROR) {
+    adminAuthFailures.push(startedAt);
+  }
+  client.disconnect();
+  return outcome;
+}
+
+/**
+ * 第 28 步（限流）开始前的窗口清理：
+ * 前面用例产生的失败记录可能还没滑出 60s 窗口（服务端按同一 IP 计数）。
+ * 这里把「可能落在窗口边界上」的记录等到明确过期，返回可以确定的「仍在窗口内」的失败次数。
+ *
+ * 判定口径（握手耗时远小于 5s，本机测试实际为毫秒级）：
+ * - 距尝试开始 < 55s：服务端一定还没过期；
+ * - 距尝试开始 > 61s：服务端一定已过期；
+ * - 55s～61s 之间：无法确定，等到确定过期（最多几秒）。
+ */
+async function settleAdminFailureWindow(): Promise<number> {
+  for (let round = 0; round < 8; round += 1) {
+    const now = Date.now();
+    const certainAlive = adminAuthFailures.filter(
+      (at) => now - at < ADMIN_FAILURE_WINDOW_MS - 5000
+    );
+    const uncertain = adminAuthFailures.filter(
+      (at) =>
+        now - at >= ADMIN_FAILURE_WINDOW_MS - 5000 &&
+        now - at <= ADMIN_FAILURE_WINDOW_MS + 1000
+    );
+    if (uncertain.length === 0) return certainAlive.length;
+    const newestUncertain = Math.max(...uncertain);
+    const waitMs = newestUncertain + ADMIN_FAILURE_WINDOW_MS + 1000 - now + 50;
+    console.log(`  等待 ${Math.max(0, waitMs)}ms 让先前鉴权失败记录滑出 60s 限流窗口`);
+    await sleep(Math.max(0, waitMs));
+  }
+  return adminAuthFailures.filter((at) => Date.now() - at < ADMIN_FAILURE_WINDOW_MS).length;
+}
+
+function emitAdminAck<E extends keyof AdminClientToServerEvents>(
+  client: AdminClient,
+  event: E,
+  payload: AdminPayloads[E],
+  timeout = ACK_TIMEOUT_MS
+): Promise<AdminAckResults[E]> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${client.label} 的 ${event} 在 ${timeout}ms 内没有收到 ack`));
+    }, timeout);
+
+    (client.socket.emit as unknown as (
+      ev: string,
+      data: unknown,
+      ack: (res: unknown) => void
+    ) => boolean)(event, payload, (res: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(res as AdminAckResults[E]);
+    });
+  });
+}
+
+/** 在管理员 client.log[since..] 中等待一个满足 predicate 的事件（口径同 waitEvent） */
+async function waitAdminEvent<E extends keyof AdminServerToClientEvents>(
+  client: AdminClient,
+  event: E,
+  predicate: (payload: AdminServerPayload<E>) => boolean = () => true,
+  options: WaitEventOptions = {}
+): Promise<AdminServerPayload<E>> {
+  const { since = 0, timeout = 12000, hint } = options;
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (let i = since; i < client.log.length; i += 1) {
+      const entry = client.log[i];
+      if (entry.event === event && predicate(entry.payload as AdminServerPayload<E>)) {
+        return entry.payload as AdminServerPayload<E>;
+      }
+    }
+    await sleep(20);
+  }
+  const seen = client.log
+    .slice(since)
+    .map((entry) => entry.event)
+    .join(', ');
+  throw new Error(
+    `${client.label} 在 ${timeout}ms 内未等到 ${event}${hint ? `（${hint}）` : ''}；期间收到: [${seen}]`
+  );
 }
 
 /* ==================== 主流程 ==================== */
@@ -2808,6 +3060,482 @@ async function main(): Promise<void> {
   eq(gEmote.emote('em-solo', 'nudge'), { ok: true, accepted: false }, '没有对手 -> accepted:false');
   gEmote.shutdown();
   pass('emote 直接驱动');
+
+  // ---------- 22. v3.5 管理后台：命名空间鉴权 + 初始 admin:rooms ----------
+  step('22. 管理后台：/admin 鉴权（无 key / 错 key / 正确 key）与初始 admin:rooms 推送');
+  eq(ADMIN_NAMESPACE, '/admin', '管理者命名空间常量为 /admin');
+  const admNoKey = await adminConnectFailure('admin-no-key', null);
+  eq(
+    admNoKey.errorMessage,
+    ADMIN_AUTH_ERROR,
+    '无 key 连接被拒：connect_error.message = ADMIN_AUTH_FAILED'
+  );
+  ok(!admNoKey.connected, '无 key 时不会建立连接');
+  const admWrongKey = await adminConnectFailure('admin-wrong-key', 'not-the-admin-key');
+  eq(
+    admWrongKey.errorMessage,
+    ADMIN_AUTH_ERROR,
+    '错误 key 连接被拒：connect_error.message = ADMIN_AUTH_FAILED'
+  );
+  ok(!admWrongKey.connected, '错误 key 时不会建立连接');
+
+  const admin = createAdminClient('admin-1', SIM_ADMIN_KEY);
+  const admHandshake = await awaitAdminHandshake(admin);
+  eq(admHandshake.errorMessage, '', '正确 key 握手无 connect_error');
+  ok(admHandshake.connected, '正确 key 连接成功（管理员 socket 已鉴权）');
+  // 连接成功后服务端立即推一次列表；历史房间可能非空，只断言形状一致性
+  const admRoomsFirst = await waitAdminEvent(admin, 'admin:rooms', () => true, {
+    since: 0,
+    timeout: 3000,
+    hint: '连接成功后立即推送 admin:rooms',
+  });
+  ok(Array.isArray(admRoomsFirst.rooms), 'admin:rooms.rooms 是数组');
+  eq(admRoomsFirst.totalRooms, admRoomsFirst.rooms.length, 'totalRooms === rooms.length');
+  eq(
+    admRoomsFirst.totalPlayers,
+    admRoomsFirst.rooms.reduce((sum, room) => sum + room.playerCount, 0),
+    'totalPlayers = Σ rooms[].playerCount'
+  );
+  ok(
+    typeof admRoomsFirst.at === 'number' &&
+      admRoomsFirst.at > 0 &&
+      admRoomsFirst.at <= Date.now() + 1000,
+    'at 是服务端生成时刻（毫秒）'
+  );
+  const admRoomsReq = asOk(await emitAdminAck(admin, 'admin:rooms:request', {}));
+  eq(admRoomsReq.ok, true, 'admin:rooms:request 返回 ok');
+  ok(Array.isArray(admRoomsReq.rooms.rooms), 'admin:rooms:request ack 里 rooms.rooms 是数组');
+  eq(
+    admRoomsReq.rooms.totalRooms,
+    admRoomsReq.rooms.rooms.length,
+    '请求响应 totalRooms === rooms.length'
+  );
+  eq(
+    admRoomsReq.rooms.totalPlayers,
+    admRoomsReq.rooms.rooms.reduce((sum, room) => sum + room.playerCount, 0),
+    '请求响应 totalPlayers = Σ rooms[].playerCount'
+  );
+  pass('管理后台鉴权与初始列表');
+
+  // ---------- 23. 管理后台房间列表：建房 / 加入 / 离开实时同步 ----------
+  step('23. 管理后台房间列表：建房/加入后出现（≤2s）、字段正确、离开后移除（≤2s）');
+  const admHost = await connectClient('adm-host');
+  const admGuest = await connectClient('adm-guest');
+  const admCreateRes = asOk(await emitAck(admHost, 'room:create', { name: '管理房主' }));
+  const admCode = admCreateRes.code;
+  asOk(await emitAck(admGuest, 'room:join', { code: admCode, name: '管理房客' }));
+
+  const admListMark = admin.mark();
+  const admListPayload = await waitAdminEvent(
+    admin,
+    'admin:rooms',
+    (p) => p.rooms.some((room) => room.code === admCode),
+    { since: admListMark, timeout: 2000, hint: `房间 ${admCode} 出现在 admin:rooms` }
+  );
+  const admSummary = admListPayload.rooms.find((room) => room.code === admCode);
+  ok(admSummary, `admin:rooms 里能找到房间 ${admCode}`);
+  eq(admSummary.code, admCode, '列表行 code 与房间码一致');
+  eq(admSummary.phase, 'lobby', '双人入座后 phase=lobby');
+  eq(admSummary.round, 1, '列表行 round=1');
+  eq(admSummary.playerCount, 2, '列表行 playerCount=2');
+  eq(admSummary.onlineCount, 2, '列表行 onlineCount=2');
+  eq(
+    admSummary.players.map((player) => player.seat),
+    ['a', 'b'],
+    'players 按座位 a/b 升序'
+  );
+  eq(admSummary.players[0].name, '管理房主', '座位 a 的昵称正确');
+  eq(admSummary.players[1].name, '管理房客', '座位 b 的昵称正确');
+  eq(admSummary.players[0].isHost, true, '座位 a 是房主');
+  eq(admSummary.players[1].isHost, false, '座位 b 不是房主');
+  eq(
+    admSummary.players.map((player) => player.connected),
+    [true, true],
+    '双方 connected=true'
+  );
+  eq(
+    admSummary.players.map((player) => player.offlineAt),
+    [null, null],
+    '在线玩家 offlineAt=null'
+  );
+  eq(admSummary.submitLimitMs, 60000, '列表行 submitLimitMs=60000（默认）');
+  eq(admSummary.deadline, null, 'lobby 阶段 deadline=null');
+  eq(admSummary.settlePending, false, 'lobby 且无结算快照：settlePending=false');
+  ok(Number.isFinite(admSummary.createdAt) && admSummary.createdAt > 0, 'createdAt 是毫秒时间戳');
+  ok(
+    Number.isFinite(admSummary.lastActivityAt) && admSummary.lastActivityAt >= admSummary.createdAt,
+    'lastActivityAt 不早于 createdAt'
+  );
+  eq(
+    admListPayload.totalRooms,
+    admListPayload.rooms.length,
+    '出现房间后 totalRooms === rooms.length'
+  );
+
+  const admLeaveMark = admin.mark();
+  eq(await emitAck(admHost, 'room:leave', {}), { ok: true }, '管理房主离开房间');
+  eq(await emitAck(admGuest, 'room:leave', {}), { ok: true }, '管理房客离开房间');
+  const admListAfterLeave = await waitAdminEvent(
+    admin,
+    'admin:rooms',
+    (p) => !p.rooms.some((room) => room.code === admCode),
+    { since: admLeaveMark, timeout: 2000, hint: `房间 ${admCode} 从列表移除` }
+  );
+  eq(
+    admListAfterLeave.rooms.some((room) => room.code === admCode),
+    false,
+    '0 人删房后列表不再包含该房间'
+  );
+  pass('管理后台房间列表实时同步');
+
+  // ---------- 24. 管理后台观战：快照相位 + 双盲提交 + 揭晓 ----------
+  step('24. 管理后台观战：watch ack 快照、submitting 阶段 submitted 布尔、揭晓前不含词、reveal 后 result/history');
+  const admW1 = await connectClient('adm-w1');
+  const admW2 = await connectClient('adm-w2');
+  const admWatchCreate = asOk(await emitAck(admW1, 'room:create', { name: '观战甲' }));
+  const admWatchCode = admWatchCreate.code;
+  asOk(await emitAck(admW2, 'room:join', { code: admWatchCode, name: '观战乙' }));
+
+  eq(
+    asError(await emitAdminAck(admin, 'admin:room:watch', { code: 'bad' })).error,
+    'INVALID_CODE',
+    'watch 非法房间码 -> INVALID_CODE'
+  );
+  eq(
+    asError(await emitAdminAck(admin, 'admin:room:watch', { code: 'ZZZZ' })).error,
+    'ROOM_NOT_FOUND',
+    'watch 不存在的房间 -> ROOM_NOT_FOUND'
+  );
+  const admWatchLower = asOk(
+    await emitAdminAck(admin, 'admin:room:watch', { code: admWatchCode.toLowerCase() })
+  );
+  eq(admWatchLower.detail.code, admWatchCode, 'watch 时房间码按大写归一');
+  const admWatchRes = asOk(
+    await emitAdminAck(admin, 'admin:room:watch', { code: admWatchCode })
+  );
+  eq(admWatchRes.detail.code, admWatchCode, 'watch ack.ok=true 且 detail.code 正确');
+  eq(admWatchRes.detail.phase, 'lobby', 'watch ack 的快照 phase=lobby');
+  eq(admWatchRes.detail.round, 1, 'watch ack 的快照 round=1');
+  eq(
+    admWatchRes.detail.players.map((player) => player.name),
+    ['观战甲', '观战乙'],
+    'watch 快照里两名玩家昵称正确'
+  );
+  eq(admWatchRes.detail.submitted, { a: false, b: false }, 'lobby 快照 submitted 全 false');
+  eq(admWatchRes.detail.agree, { a: false, b: false }, 'lobby 快照 agree 全 false');
+  eq(admWatchRes.detail.result, null, 'lobby 快照 result=null');
+  eq(admWatchRes.detail.history, [], 'lobby 快照 history=[]');
+  eq(admWatchRes.detail.settleEndedAt, null, 'lobby 快照 settleEndedAt=null');
+  eq(admWatchRes.detail.deadline, null, 'lobby 快照 deadline=null');
+  ok(!payloadMentions(admWatchRes.detail, 'token'), '观战快照 JSON 不含 token 字段');
+  ok(
+    !payloadMentions(admWatchRes.detail, admWatchCreate.token),
+    '观战快照 JSON 不含玩家 token 值'
+  );
+
+  const admWatchMark = admin.mark();
+  eq((await emitAck(admW1, 'player:ready', { ready: true })).ok, true, '观战房 A ready');
+  eq((await emitAck(admW2, 'player:ready', { ready: true })).ok, true, '观战房 B ready');
+  const admSubmittingState = await waitAdminEvent(
+    admin,
+    'admin:room:state',
+    (p) => p.code === admWatchCode && p.detail.phase === 'submitting',
+    { since: admWatchMark, timeout: 8000, hint: '双人 ready 后观战收到 submitting 状态' }
+  );
+  eq(admSubmittingState.detail.submitted, { a: false, b: false }, 'submitting 初始 submitted 全 false');
+  eq(admSubmittingState.detail.agree, { a: false, b: false }, 'submitting 阶段 agree 恒 false');
+  ok(
+    typeof admSubmittingState.detail.deadline === 'number' &&
+      admSubmittingState.detail.deadline > Date.now(),
+    'submitting 阶段观战 detail.deadline 指向未来'
+  );
+
+  const admWordA = '紫电苹果';
+  const admWordB = '青霜云朵';
+  const admSubmitMark = admin.mark();
+  eq(
+    await emitAck(admW1, 'round:submit', { word: admWordA }),
+    { ok: true, submitted: true },
+    '观战房 A 提交成功'
+  );
+  const admStateAfterA = await waitAdminEvent(
+    admin,
+    'admin:room:state',
+    (p) =>
+      p.code === admWatchCode && p.detail.phase === 'submitting' && p.detail.submitted.a === true,
+    { since: admSubmitMark, timeout: 3000, hint: 'A 提交后观战 detail.submitted.a=true' }
+  );
+  eq(
+    admStateAfterA.detail.submitted,
+    { a: true, b: false },
+    'submitted 随提交实时变化（A 已交、B 未交）'
+  );
+  eq(admStateAfterA.detail.result, null, 'B 未提交前揭晓结果仍为 null');
+  ok(!payloadMentions(admStateAfterA.detail, admWordA), '双盲：A 已提交，观战载荷不含 A 的词');
+  ok(!payloadMentions(admStateAfterA.detail, admWordB), '双盲：B 未提交，观战载荷不含 B 的词');
+
+  const admRevealMark = admin.mark();
+  eq(
+    await emitAck(admW2, 'round:submit', { word: admWordB }),
+    { ok: true, submitted: true },
+    '观战房 B 提交成功'
+  );
+  const admRevealState = await waitAdminEvent(
+    admin,
+    'admin:room:state',
+    (p) =>
+      p.code === admWatchCode &&
+      p.detail.result !== null &&
+      p.detail.result.words.a === admWordA,
+    { since: admRevealMark, timeout: 5000, hint: '揭晓后观战 detail.result 带两个词' }
+  );
+  eq(admRevealState.detail.phase, 'reveal', '不同词 -> 观战 phase=reveal');
+  eq(admRevealState.detail.submitted, { a: true, b: true }, '揭晓后 submitted 双 true');
+  eq(
+    admRevealState.detail.result?.words,
+    { a: admWordA, b: admWordB },
+    'reveal 后 detail.result.words 含双方词'
+  );
+  eq(admRevealState.detail.result?.isWin, false, '不同词 reveal 后 isWin=false');
+  eq(admRevealState.detail.history.length, 1, 'reveal 后 history 增长到 1 轮');
+  eq(
+    admRevealState.detail.history[0]?.words,
+    { a: admWordA, b: admWordB },
+    'reveal 后 history 里带本轮词'
+  );
+  const admPreRevealStates = admin.log
+    .slice(admWatchMark, admRevealMark)
+    .filter((entry) => entry.event === 'admin:room:state');
+  ok(admPreRevealStates.length > 0, '观战期间收到过 admin:room:state 增量推送');
+  eq(
+    admPreRevealStates.filter(
+      (entry) =>
+        payloadMentions(entry.payload, admWordA) || payloadMentions(entry.payload, admWordB)
+    ).map((entry) => entry.event),
+    [],
+    '揭晓前所有 admin:room:state 载荷都不含双方未揭晓的词'
+  );
+  pass('观战快照与双盲边界');
+
+  // ---------- 25. 管理后台停止观战 ----------
+  step('25. 管理后台停止观战：unwatch ack 与 800ms 内不再推送该房间');
+  eq(
+    asError(await emitAdminAck(admin, 'admin:room:unwatch', { code: 'bad' })).error,
+    'INVALID_CODE',
+    'unwatch 非法房间码 -> INVALID_CODE'
+  );
+  eq(
+    await emitAdminAck(admin, 'admin:room:unwatch', { code: admWatchCode }),
+    { ok: true },
+    'unwatch ack {ok:true}'
+  );
+  const admQuietMark = admin.mark();
+  eq(
+    (await emitAck(admW1, 'round:agree', { agree: true })).ok,
+    true,
+    '停止观战后 A 投同意票（制造房间状态变化）'
+  );
+  await sleep(800);
+  const admLeakedStates = admin.log
+    .slice(admQuietMark)
+    .filter(
+      (entry) =>
+        entry.event === 'admin:room:state' &&
+        (entry.payload as AdminRoomStatePayload).code === admWatchCode
+    );
+  eq(
+    admLeakedStates.length,
+    0,
+    `unwatch 后 800ms 内仍收到房间 ${admWatchCode} 的 admin:room:state：${admLeakedStates.length} 条`
+  );
+  pass('停止观战');
+
+  // ---------- 26. 管理后台终止房间 ----------
+  step('26. 管理后台终止房间：玩家 ROOM_DELETED、观战 closed、列表移除、重复删除与非法码');
+  const admAdmin2 = createAdminClient('admin-2', SIM_ADMIN_KEY);
+  const admAdmin2Handshake = await awaitAdminHandshake(admAdmin2);
+  ok(admAdmin2Handshake.connected, '第二名管理员连接成功');
+  const admWatch2Res = asOk(
+    await emitAdminAck(admAdmin2, 'admin:room:watch', { code: admWatchCode })
+  );
+  eq(admWatch2Res.detail.code, admWatchCode, '第二名管理员进入观战');
+
+  const admDelMarkW1 = admW1.mark();
+  const admDelMarkW2 = admW2.mark();
+  const admDelMarkAdmin = admin.mark();
+  const admDelMarkAdmin2 = admAdmin2.mark();
+  const admDeleteRes = asOk(
+    await emitAdminAck(admin, 'admin:room:delete', { code: admWatchCode })
+  );
+  eq(admDeleteRes, { ok: true, code: admWatchCode }, 'admin:room:delete ack {ok:true, code}');
+
+  const admErrW1 = await waitEvent(admW1, 'room:error', (p) => p.code === 'ROOM_DELETED', {
+    since: admDelMarkW1,
+    timeout: 3000,
+    hint: '房主收到 ROOM_DELETED',
+  });
+  eq(admErrW1.code, 'ROOM_DELETED', '房主收到 room:error code=ROOM_DELETED');
+  eq(admErrW1.message, '房间已被管理员关闭', '房主的 ROOM_DELETED 文案与 §14.3 一致');
+  const admErrW2 = await waitEvent(admW2, 'room:error', (p) => p.code === 'ROOM_DELETED', {
+    since: admDelMarkW2,
+    timeout: 3000,
+    hint: '房客收到 ROOM_DELETED',
+  });
+  eq(admErrW2.code, 'ROOM_DELETED', '房客收到 room:error code=ROOM_DELETED');
+  eq(admErrW2.message, '房间已被管理员关闭', '房客的 ROOM_DELETED 文案与 §14.3 一致');
+
+  const admClosed = await waitAdminEvent(
+    admAdmin2,
+    'admin:room:closed',
+    (p) => p.code === admWatchCode,
+    { since: admDelMarkAdmin2, timeout: 3000, hint: '观战方收到 admin:room:closed' }
+  );
+  eq(
+    admClosed,
+    { code: admWatchCode, reason: 'deleted' },
+    '观战方收到 admin:room:closed {code, reason:deleted}'
+  );
+
+  const admListAfterDelete = await waitAdminEvent(
+    admin,
+    'admin:rooms',
+    (p) => !p.rooms.some((room) => room.code === admWatchCode),
+    { since: admDelMarkAdmin, timeout: 2000, hint: `删除后列表移除 ${admWatchCode}` }
+  );
+  eq(
+    admListAfterDelete.rooms.some((room) => room.code === admWatchCode),
+    false,
+    '终止房间后 admin:rooms 列表移除该房间'
+  );
+  eq(
+    asError(await emitAdminAck(admin, 'admin:room:delete', { code: admWatchCode })).error,
+    'ROOM_NOT_FOUND',
+    '重复 delete 同一房间 -> ROOM_NOT_FOUND'
+  );
+  eq(
+    asError(await emitAdminAck(admin, 'admin:room:delete', { code: 'bad' })).error,
+    'INVALID_CODE',
+    'delete 非法房间码 -> INVALID_CODE'
+  );
+  pass('终止房间语义');
+
+  // ---------- 27. env.ts 纯函数与 loadEnvFile ----------
+  step('27. env.ts：parseEnvText 边界（BOM/CRLF/注释/export/引号/行内注释/重复键）与 loadEnvFile 不覆盖');
+  eq(parseEnvText(''), {}, '空文本 -> {}');
+  eq(parseEnvText('# 只有注释\n\n   \n'), {}, '只有注释与空行 -> {}');
+  const admEnvText = [
+    '\uFEFF# 注释行',
+    '',
+    'export EXPORTED=exported-value',
+    'EMPTY=',
+    'PLAIN=plain-value',
+    'QUOTED="a b # c"',
+    "SINGLE='x # y'",
+    'INLINE=value # trailing comment',
+    '  SPACED  =  trimmed  ',
+    'DUP=one',
+    'DUP=two',
+    'ESCAPED="line1\\nline2\\tend"',
+    '__proto__=polluted',
+    'INVALID KEY=no',
+    'NO_EQUALS',
+  ].join('\r\n');
+  const admParsed = parseEnvText(admEnvText);
+  eq(admParsed.EXPORTED, 'exported-value', '行首 export 前缀被去掉');
+  eq(admParsed.EMPTY, '', '空值解析为空串');
+  eq(admParsed.PLAIN, 'plain-value', '普通值');
+  eq(admParsed.QUOTED, 'a b # c', '双引号内的 # 不当注释');
+  eq(admParsed.SINGLE, 'x # y', '单引号原样保留 #');
+  eq(admParsed.INLINE, 'value', '未加引号的值去掉行内注释');
+  eq(admParsed.SPACED, 'trimmed', '键与值两侧空白被去掉');
+  eq(admParsed.DUP, 'two', '重复键以最后一次为准');
+  eq(admParsed.ESCAPED, 'line1\nline2\tend', '双引号内 \\n / \\t 转义');
+  ok(!hasOwn(admParsed, '__proto__'), '危险键 __proto__ 被忽略（不污染普通对象）');
+  ok(!hasOwn(admParsed, 'INVALID KEY'), '非法键名（含空格）被忽略');
+  ok(!hasOwn(admParsed, 'NO_EQUALS'), '没有 = 的行被忽略');
+  eq(parseEnvText('A="quote \\" and \\\\ end"').A, 'quote " and \\ end', '双引号内 \\" 与 \\\\ 转义');
+  eq(Object.keys(parseEnvText('KEY=value')).sort(), ['KEY'], 'BOM/CRLF 之外的普通行解析');
+
+  const admEnvFile = path.join(tmpdir(), `sim-env-${Date.now()}-${process.pid}.env`);
+  const admEnvKeepKey = `SIM_ENV_KEEP_${Date.now()}`;
+  const admEnvNewKey = `SIM_ENV_NEW_${Date.now()}`;
+  const admEnvHadKeep = hasOwn(process.env, admEnvKeepKey);
+  const admEnvPrevKeep = process.env[admEnvKeepKey];
+  const admEnvHadNew = hasOwn(process.env, admEnvNewKey);
+  const admEnvPrevNew = process.env[admEnvNewKey];
+  try {
+    process.env[admEnvKeepKey] = 'from-process';
+    writeFileSync(
+      admEnvFile,
+      `\uFEFF# temp\r\n${admEnvKeepKey}=from-file\r\n${admEnvNewKey}=from-file\r\n`,
+      'utf8'
+    );
+    const admApplied = loadEnvFile(admEnvFile);
+    eq(process.env[admEnvKeepKey], 'from-process', 'loadEnvFile 不覆盖已存在的 process.env');
+    ok(!hasOwn(admApplied, admEnvKeepKey), '已存在的键不计入「本次写入」返回值');
+    eq(process.env[admEnvNewKey], 'from-file', '缺失的键被写入 process.env');
+    eq(admApplied[admEnvNewKey], 'from-file', '返回值只包含本次真正写入的键');
+    eq(
+      loadEnvFile(path.join(tmpdir(), `sim-env-missing-${Date.now()}.env`)),
+      {},
+      '文件不存在时返回 {}（不抛错）'
+    );
+  } finally {
+    try {
+      rmSync(admEnvFile, { force: true });
+    } catch {
+      // ignore
+    }
+    if (admEnvHadKeep) process.env[admEnvKeepKey] = admEnvPrevKeep;
+    else delete process.env[admEnvKeepKey];
+    if (admEnvHadNew) process.env[admEnvNewKey] = admEnvPrevNew;
+    else delete process.env[admEnvNewKey];
+  }
+  ok(!hasOwn(process.env, admEnvNewKey), '测试后已清理临时写入的 process.env 键');
+  pass('env.ts 解析与加载');
+
+  // ---------- 28. 管理后台限流（必须放在 admin 测试段最后） ----------
+  step('28. 管理后台限流：同 IP 60s 窗口内失败 10 次后，第 11 次起（含正确 key）ADMIN_RATE_LIMITED');
+  const admPriorFailures = await settleAdminFailureWindow();
+  ok(
+    admPriorFailures <= ADMIN_FAILURE_LIMIT,
+    `窗口内已累计失败次数 ${admPriorFailures} 不应超过 ${ADMIN_FAILURE_LIMIT}`
+  );
+  const admNeededFailures = ADMIN_FAILURE_LIMIT - admPriorFailures;
+  console.log(
+    `  窗口内已累计 ${admPriorFailures} 次失败，再失败 ${admNeededFailures} 次后应开始限流`
+  );
+  for (let i = 1; i <= admNeededFailures; i += 1) {
+    const admAttempt = await adminConnectFailure(
+      `admin-rate-${i}`,
+      'wrong-key-rate-limit'
+    );
+    eq(
+      admAttempt.errorMessage,
+      ADMIN_AUTH_ERROR,
+      `窗口内第 ${admPriorFailures + i} 次错 key 仍返回 ADMIN_AUTH_FAILED`
+    );
+    ok(!admAttempt.connected, '错 key 不会建立连接');
+  }
+  const admLimitedWrong = await adminConnectFailure(
+    'admin-rate-wrong',
+    'wrong-key-after-limit'
+  );
+  eq(
+    admLimitedWrong.errorMessage,
+    ADMIN_RATE_LIMIT_ERROR,
+    `第 ${ADMIN_FAILURE_LIMIT + 1} 次（错误 key）返回 ADMIN_RATE_LIMITED`
+  );
+  ok(!admLimitedWrong.connected, '被限流时不会建立连接');
+  // 窗口内即使密钥正确也先拒绝（§14.1）
+  const admLimitedRight = await adminConnectFailure('admin-rate-correct', SIM_ADMIN_KEY);
+  eq(
+    admLimitedRight.errorMessage,
+    ADMIN_RATE_LIMIT_ERROR,
+    `第 ${ADMIN_FAILURE_LIMIT + 1} 次起即使 key 正确也先返回 ADMIN_RATE_LIMITED`
+  );
+  ok(!admLimitedRight.connected, '限流窗口内正确 key 也连不上');
+  pass('管理后台限流');
 }
 
 /* ==================== 执行 ==================== */
@@ -2838,6 +3566,7 @@ process.on('SIGINT', () => {
     }
   } finally {
     for (const client of clients) client.disconnect();
+    for (const client of adminClients) client.disconnect();
     await stopServer();
     process.exit(exitCode);
   }

@@ -19,7 +19,8 @@
     "typecheck": "tsc -p tsconfig.server.json --noEmit && vue-tsc --noEmit -p tsconfig.app.json && tsc -p tsconfig.tests.json --noEmit",
     "test": "tsx tools/sim.ts",
     "sim": "tsx tools/sim.ts",
-    "verify:ui": "tsx .verify/ui-e2e.ts"
+    "verify:ui": "tsx .verify/ui-e2e.ts",
+    "verify:admin": "tsx .verify/admin-e2e.ts"
   },
   "dependencies": {
     "express": "^4.21.2",

@@ -15,6 +15,7 @@
 
 import { randomInt, randomUUID } from 'node:crypto';
 
+import type { AdminDeleteOk, AdminRoomDetail, AdminRoomSummary } from '../shared/admin.js';
 import { DEFAULT_SUBMIT_MS, EMOTE_KINDS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
 import type {
   ActionError,
@@ -176,12 +177,19 @@ export interface GameTransport {
     payload: ServerPayload<E>
   ): void;
   onSocketReplaced?(oldSocketId: string, room: Room, player: Player): void;
+  /**
+   * v3.5：房间已从内存删除（含管理员 `admin:room:delete`）。
+   * 传输层用它清理残留的房间频道订阅：管理员终止房间时玩家 socket 仍然连着，
+   * 若不退出 `room_CODE` 频道，之后复用同一房间码的新房间会把广播推给这些旧连接。
+   */
+  onRoomDeleted?(room: Room): void;
 }
 
 export type GameOptions = {
   emitToRoom?: GameTransport['emitToRoom'];
   emitToPlayer?: GameTransport['emitToPlayer'];
   onSocketReplaced?: NonNullable<GameTransport['onSocketReplaced']>;
+  onRoomDeleted?: NonNullable<GameTransport['onRoomDeleted']>;
 };
 
 /* ==================== 校验工具 ==================== */
@@ -267,6 +275,8 @@ export class Game {
 
   onSocketReplaced: NonNullable<GameTransport['onSocketReplaced']>;
 
+  onRoomDeleted: NonNullable<GameTransport['onRoomDeleted']>;
+
   sweepTimer: ReturnType<typeof setInterval> | null;
 
   constructor(options: GameOptions = {}) {
@@ -276,6 +286,8 @@ export class Game {
       typeof options.emitToPlayer === 'function' ? options.emitToPlayer : () => {};
     this.onSocketReplaced =
       typeof options.onSocketReplaced === 'function' ? options.onSocketReplaced : () => {};
+    this.onRoomDeleted =
+      typeof options.onRoomDeleted === 'function' ? options.onRoomDeleted : () => {};
     this.sweepTimer = null;
   }
 
@@ -874,6 +886,119 @@ export class Game {
     }
   }
 
+  // ==================== 管理后台视角（v3.5，PROTOCOL.md §14，只读） ====================
+
+  /**
+   * 管理后台列表行（§14.2）。只含公开信息：
+   * `phase` / `round` / `deadline` 都是房间**真实值**；结算快照挂起时前端用
+   * `settlePending` 显示「结算中」（观战详情才取快照值，见 getSpectatorState）。
+   */
+  getRoomSummary(room: Room): AdminRoomSummary {
+    const players = room.players
+      .slice()
+      .sort((x, y) => (x.seat < y.seat ? -1 : x.seat > y.seat ? 1 : 0))
+      .map((p) => ({
+        seat: p.seat,
+        name: p.name,
+        isHost: Boolean(p.isHost),
+        ready: Boolean(p.ready),
+        connected: Boolean(p.connected),
+        // 在线一律 null；只有断线但尚未被清理时才带离线起点
+        offlineAt: p.connected ? null : p.offlineAt,
+      }));
+    // deadline 语义与 §5.3 一致：只有 countdown / submitting 有意义，其余恒 null
+    const counting = room.phase === 'countdown' || room.phase === 'submitting';
+    return {
+      code: room.code,
+      phase: room.phase,
+      round: room.round,
+      players,
+      playerCount: players.length,
+      onlineCount: players.filter((p) => p.connected).length,
+      submitLimitMs: room.submitLimitMs,
+      deadline: counting ? room.deadline ?? null : null,
+      createdAt: room.createdAt,
+      lastActivityAt: room.lastActivityAt,
+      settlePending: Boolean(room.lastGame),
+    };
+  }
+
+  /** 管理后台房间列表：按创建时间升序（稳定顺序，便于变化比对与自动化断言） */
+  listRooms(): AdminRoomSummary[] {
+    return Array.from(this.rooms.values())
+      .sort((x, y) => x.createdAt - y.createdAt || (x.code < y.code ? -1 : x.code > y.code ? 1 : 0))
+      .map((room) => this.getRoomSummary(room));
+  }
+
+  /**
+   * 管理后台观战详情（§14.2）。数据边界与玩家 §5.3 完全一致：
+   * `submitted` 只暴露布尔值，**揭晓前任何载荷都不含词**；`result` / `history`
+   * 里出现词只可能是已经揭晓的内容。结算快照挂起时 `round/basis/result/history`
+   * 取 lastGame（与 §5.3.1 的 won 视角一致），`submitted` / `agree` 恒为 false。
+   */
+  getSpectatorState(room: Room): AdminRoomDetail {
+    const summary = this.getRoomSummary(room);
+    const settle = room.lastGame;
+    if (settle) {
+      return {
+        ...summary,
+        round: settle.round,
+        basis: this._publicBasis(settle.basis),
+        submitted: { a: false, b: false },
+        agree: { a: false, b: false },
+        result: this._publicResult(settle.result),
+        history: this._publicHistory(settle.history),
+        settleEndedAt: settle.endedAt,
+      };
+    }
+
+    // §5.3：agree 只在 reveal 阶段为真实值，其余相位恒 false
+    const inReveal = room.phase === 'reveal';
+    const votes = this._agreeOf(room);
+    return {
+      ...summary,
+      basis: this._publicBasis(room.basis),
+      submitted: {
+        a: Boolean(room.submissions && room.submissions.a),
+        b: Boolean(room.submissions && room.submissions.b),
+      },
+      agree: inReveal
+        ? { a: Boolean(votes.a), b: Boolean(votes.b) }
+        : { a: false, b: false },
+      result: this._publicResult(room.result),
+      history: this._publicHistory(room.history),
+      settleEndedAt: null,
+    };
+  }
+
+  /**
+   * 管理后台终止房间（§14.3）。房间码归一后查找，复用玩家协议的错误码：
+   * 格式非法 = INVALID_CODE，不存在 = ROOM_NOT_FOUND。
+   *
+   * 语义固定为：先给房间内所有**在线**玩家定向发 `room:error {code:'ROOM_DELETED'}`
+   * （前端按既有逻辑 teardown 回首页）→ 清计时器与结算快照 → 从内存删除。
+   * 不广播 `room:state`，也不伪造任何玩家事件。
+   */
+  adminDeleteRoom(rawCode: unknown): ActionResult<AdminDeleteOk> {
+    const codeRes = validateCode(rawCode);
+    if (!codeRes.ok) return codeRes;
+    const code = codeRes.value;
+
+    const room = this.rooms.get(code);
+    if (!room) return fail('ROOM_NOT_FOUND');
+
+    // 1) 先通知所有在线玩家（_emitPlayer 对离线 / 无 socketId 的玩家自动跳过）
+    for (const player of room.players) {
+      this._emitPlayer(player, 'room:error', {
+        code: 'ROOM_DELETED',
+        message: '房间已被管理员关闭',
+      });
+    }
+    // 2) 清计时器 / 结算快照并删房（_deleteRoom 会通知传输层做频道清理）
+    this._deleteRoom(code);
+    return { ok: true, code };
+  }
+
   // ==================== 内部：状态机 ====================
 
   _scheduleStart(room: Room): void {
@@ -1141,6 +1266,12 @@ export class Game {
     this._clearTimer(room);
     this._clearSettle(room); // v2.1：sweep / 0 人删房时一并作废结算快照
     this.rooms.delete(code);
+    // v3.5：通知传输层清理残留频道订阅；回调异常不能影响删房本身
+    try {
+      this.onRoomDeleted(room);
+    } catch (err) {
+      console.error('[game] onRoomDeleted 回调异常', err);
+    }
     return true;
   }
 }

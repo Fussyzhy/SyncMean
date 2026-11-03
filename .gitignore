@@ -10,6 +10,11 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# 环境变量：.env 含管理员密钥等敏感配置，只提交模板
+.env
+.env.local
+!.env.example
+
 # 日志 / 系统 / 编辑器
 *.log
 .DS_Store

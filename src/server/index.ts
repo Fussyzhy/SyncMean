@@ -13,6 +13,8 @@ import express from 'express';
 import { Server } from 'socket.io';
 
 import Game, { ERROR_MESSAGES } from './game.js';
+import { attachAdmin } from './admin.js';
+import { ADMIN_ENABLED, PORT } from './env.js';
 import type {
   ActionError,
   ActionResult,
@@ -37,8 +39,7 @@ import type {
 } from '../shared/protocol.js';
 import type { GameTransport } from './game.js';
 
-const PORT = Number(process.env.PORT || 3210);
-
+// 端口统一由 env.ts 解析：进程环境变量 > 项目根目录 .env > 3210（PROTOCOL.md §2）。
 // 项目根 = 本模块往上两级（`src/server/index.ts` 与编译后 `dist/server/index.js` 都是两级），
 // 前端产物固定托管在 `<root>/dist/public`。
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -85,9 +86,24 @@ const transport: GameTransport = {
     });
     console.log(`[同声传意] ${player.name} 的连接被顶替（room=${room.code}）`);
   },
+  /**
+   * v3.5：房间删除后清掉仍连着的玩家 socket 的房间频道订阅。
+   * 管理员终止房间时玩家 socket 不会断开；若不退出 `room_CODE` 频道，
+   * 之后复用同一房间码的新房间会把 `round:reveal` 等广播发给这些旧连接。
+   */
+  onRoomDeleted(room) {
+    for (const player of room.players) {
+      if (!player.socketId) continue;
+      const socket = io.sockets.sockets.get(player.socketId);
+      if (socket) socket.leave(channelName(room.code));
+    }
+  },
 };
 
 const game = new Game(transport);
+
+// v3.5：管理后台独立命名空间（未配置 ADMIN_KEY 时所有管理员连接都会被拒绝）
+const admin = attachAdmin(io, game);
 
 // ==================== HTTP ====================
 
@@ -270,6 +286,14 @@ game.startSweeper();
 server.listen(PORT, () => {
   console.log(`[同声传意] 服务已启动：http://localhost:${PORT}`);
   console.log(`[同声传意] 健康检查：http://localhost:${PORT}/health`);
+  // v3.5：只打印启用状态，**绝不打印密钥**
+  if (ADMIN_ENABLED) {
+    console.log(`[同声传意] 管理后台已启用：http://localhost:${PORT}/admin（已配置 ADMIN_KEY）`);
+  } else {
+    console.log(
+      '[同声传意] 管理后台未配置 ADMIN_KEY，/admin 将被拒绝（不影响正常游戏；在 .env 或进程环境变量里配置）'
+    );
+  }
 });
 
 let shuttingDown = false;
@@ -277,6 +301,12 @@ function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[同声传意] 收到 ${signal}，正在关闭……`);
+  // v3.5：先停掉管理后台的推送定时器，避免关闭过程中继续广播
+  try {
+    admin.dispose();
+  } catch (err) {
+    console.error('[同声传意] 清理管理后台失败', err);
+  }
   // v3.3：先给所有房间发关停通知，留 250ms 让 socket.io 把消息刷出去，再清理房间
   try {
     game.announceShutdown();

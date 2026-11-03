@@ -22,3 +22,4 @@
 @use 'overlay';     // 覆盖层：倒计时 / toast / 断网 / 音效 / 撒花
 @use 'animations';  // 全部 @keyframes
 @use 'responsive';  // 359px / 600px / reduced-motion 媒体查询
+@use 'admin';       // 管理后台（/admin，全部作用域收在 #view-admin 下，不影响游戏页）

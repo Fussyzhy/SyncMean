@@ -16,6 +16,10 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3210"
+      # 管理后台 /admin 的访问密钥：从宿主环境变量或项目根目录 .env 传入。
+      # Compose 会自动读取根目录 .env 做变量替换（.env 已被 .gitignore / .dockerignore 排除）；
+      # 留空 = 管理后台禁用（不影响正常游戏）。也可以在启动前 `export ADMIN_KEY=...` 覆盖。
+      ADMIN_KEY: ${ADMIN_KEY:-}
     healthcheck:
       test:
         - CMD

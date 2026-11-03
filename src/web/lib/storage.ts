@@ -13,6 +13,11 @@ export const KEY_TOKEN = '321:token';
 export const KEY_SESSION = '321:session';
 export const KEY_SOUND = '321:sound';
 /**
+ * 管理后台密钥（PROTOCOL.md §14.1）。
+ * 只允许存 sessionStorage：刷新免重输、关标签页即失效；禁止写 localStorage / URL / DOM。
+ */
+export const KEY_ADMIN = '321:admin-key';
+/**
  * 明暗主题的「用户显式选择」。注意：`index.html` 里的防闪烁内联脚本也硬编码了
  * 这个键名（内联脚本无法 import），改这里必须同步改 index.html。
  */
@@ -152,4 +157,15 @@ export function loadSession(): StoredSession | null {
 
 export function saveSession(session: StoredSession | null): void {
   writeLive(KEY_SESSION, session ? JSON.stringify(session) : null);
+}
+
+/* ---------------- sessionStorage（管理后台密钥） ---------------- */
+
+export function loadAdminKey(): string {
+  return readLive(KEY_ADMIN) || '';
+}
+
+/** 传空值表示清除（退出登录 / 服务端拒绝鉴权后）；只在鉴权成功后才会写入 */
+export function saveAdminKey(key: string | null | undefined): void {
+  writeLive(KEY_ADMIN, key);
 }
