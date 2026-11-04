@@ -27,15 +27,16 @@ export type SubmitLimitMs = (typeof SUBMIT_LIMIT_OPTIONS)[number];
 /** 请求里未指定 submitLimitMs 时（含旧客户端）使用 1 分钟，与历史行为一致 */
 export const DEFAULT_SUBMIT_MS: SubmitLimitMs = 60000;
 
-/* ==================== v3.4：预设快捷表情 ==================== */
+/* ==================== v3.6：玩家互动（戳一戳 / 扔番茄 / 倒咖啡） ==================== */
 
 /**
- * 快捷表情白名单。只允许预设值，**不接受自由文本**：
+ * 互动白名单。只允许预设值，**不接受自由文本**：
  * 否则会变成双盲提交阶段的暗示通道（见 PROTOCOL.md §5.1）。
+ * 三种互动都是纯玩法/情绪表达，服务端不解释语义，只负责白名单校验 + 1s 限流 + 定向转发。
  */
-export const EMOTE_KINDS = ['nudge', 'thinking', 'cheer'] as const;
+export const INTERACT_KINDS = ['poke', 'tomato', 'coffee'] as const;
 
-export type EmoteKind = (typeof EMOTE_KINDS)[number];
+export type InteractKind = (typeof INTERACT_KINDS)[number];
 
 export type ErrorCode =
   | 'INVALID_NAME'
@@ -47,7 +48,7 @@ export type ErrorCode =
   | 'BAD_PHASE'
   | 'INVALID_WORD'
   | 'INVALID_SUBMIT_LIMIT'
-  | 'INVALID_EMOTE'
+  | 'INVALID_INTERACT'
   | 'REPLACED'
   | 'OPPONENT_LEFT'
   | 'ROOM_DELETED'
@@ -173,8 +174,8 @@ export interface RestartOk {
   watching: boolean;
 }
 
-/** v3.4：快捷表情 ack。accepted=false 表示冷却中或对方离线，未送达 */
-export interface EmoteOk {
+/** v3.6：互动 ack。accepted=false 表示冷却中或对方离线，未送达 */
+export interface InteractOk {
   ok: true;
   accepted: boolean;
 }
@@ -206,9 +207,9 @@ export interface AgreePayload {
   agree?: boolean;
 }
 
-/** v3.4：快捷表情请求；kind 必须在 EMOTE_KINDS 内，否则 INVALID_EMOTE */
-export interface EmotePayload {
-  kind: EmoteKind;
+/** v3.6：互动请求；kind 必须在 INTERACT_KINDS 内，否则 INVALID_INTERACT */
+export interface InteractPayload {
+  kind: InteractKind;
 }
 
 /** 无载荷事件统一用它（socket.io 要求至少一个参数） */
@@ -245,6 +246,16 @@ export interface NoticePayload {
   kind: NoticeKind;
 }
 
+/**
+ * v3.6：定向发给「被互动的一方」的事件载荷，用于播放对应特效 + 提示。
+ * 只有白名单 kind 和发送者昵称，**不含任何自由文本**；提示文案由前端按白名单生成。
+ */
+export interface InteractedPayload {
+  kind: InteractKind;
+  /** 发起互动的玩家昵称（用于「小明 戳了戳你」这类提示） */
+  name: string;
+}
+
 export interface RoomErrorPayload {
   code: RoomLevelErrorCode;
   message: string;
@@ -262,7 +273,7 @@ export interface ClientToServerEvents {
   'round:submit': (payload: SubmitPayload, ack?: Ack<ActionResult<SubmitOk>>) => void;
   'round:agree': (payload?: AgreePayload, ack?: Ack<ActionResult<AgreeOk>>) => void;
   'round:next': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
-  'room:emote': (payload: EmotePayload, ack?: Ack<ActionResult<EmoteOk>>) => void;
+  'room:interact': (payload: InteractPayload, ack?: Ack<ActionResult<InteractOk>>) => void;
   'game:end': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
   'game:restart': (payload?: EmptyPayload, ack?: Ack<ActionResult<RestartOk>>) => void;
 }
@@ -274,6 +285,8 @@ export interface ServerToClientEvents {
   'round:opponent-submitted': (payload: EmptyPayload) => void;
   'round:reveal': (payload: RevealPayload) => void;
   'room:notice': (payload: NoticePayload) => void;
+  /** v3.6：有人对你发起互动（定向只发给对方；发送者靠 ack + 本地动画回显） */
+  'room:interacted': (payload: InteractedPayload) => void;
   'room:error': (payload: RoomErrorPayload) => void;
 }
 
@@ -294,7 +307,7 @@ export const CLIENT_EVENTS = [
   'round:submit',
   'round:agree',
   'round:next',
-  'room:emote',
+  'room:interact',
   'game:end',
   'game:restart',
 ] as const satisfies readonly (keyof ClientToServerEvents)[];
@@ -306,5 +319,6 @@ export const SERVER_EVENTS = [
   'round:opponent-submitted',
   'round:reveal',
   'room:notice',
+  'room:interacted',
   'room:error',
 ] as const satisfies readonly (keyof ServerToClientEvents)[];

@@ -11,10 +11,10 @@
  */
 
 import { computed, reactive, ref, watch } from 'vue';
-import { DEFAULT_SUBMIT_MS, EMOTE_KINDS, SUBMIT_LIMIT_OPTIONS } from '@shared/protocol';
+import { DEFAULT_SUBMIT_MS, INTERACT_KINDS, SUBMIT_LIMIT_OPTIONS } from '@shared/protocol';
 import type {
   AgreePair,
-  EmoteKind,
+  InteractKind,
   PublicPlayer,
   PublicRoomState,
   Result,
@@ -25,6 +25,7 @@ import type {
   CountdownPayload,
   RoundOpenPayload,
   NoticePayload,
+  InteractedPayload,
   RoomErrorPayload,
 } from '@shared/protocol';
 import { useSocket } from './useSocket';
@@ -32,6 +33,7 @@ import { useToast } from './useToast';
 import { useSound } from './useSound';
 import { useCountdown } from './useCountdown';
 import { useConfetti } from './useConfetti';
+import { useInteractionFx } from '@/composables/useInteractionFx';
 import {
   KEY_NICK,
   loadNick,
@@ -75,12 +77,44 @@ function submitLimitLabel(ms: number): string {
   return seconds < 60 ? seconds + ' 秒' : Math.round(seconds / 60) + ' 分钟';
 }
 
-/** v3.4 快捷表情的白名单文案（只允许预设值，服务端会再校验一次） */
-const EMOTE_LABELS: Record<EmoteKind, { label: string; emoji: string }> = {
-  nudge: { label: '催一下', emoji: '⏰' },
-  thinking: { label: '还在想', emoji: '🤔' },
-  cheer: { label: '加油', emoji: '💪' },
+/**
+ * v3.6 玩家互动的白名单文案（只允许预设值，服务端会再校验一次）。
+ * 接收提示的 `{name}` 是发起方昵称，发送提示的 `{name}` 是对方昵称。
+ */
+const INTERACT_LABELS: Record<
+  InteractKind,
+  {
+    label: string;
+    emoji: string;
+    received(name: string): string;
+    sent(name: string): string;
+  }
+> = {
+  poke: {
+    label: '戳一戳',
+    emoji: '👉',
+    received: (name) => name + ' 戳了戳你',
+    sent: (name) => '已戳「' + name + '」一下',
+  },
+  tomato: {
+    label: '扔番茄',
+    emoji: '🍅',
+    received: (name) => name + ' 朝你扔了个番茄 🍅',
+    sent: (name) => '番茄已扔向「' + name + '」',
+  },
+  coffee: {
+    label: '倒咖啡',
+    emoji: '☕',
+    received: (name) => name + ' 给你倒了杯咖啡 ☕',
+    sent: (name) => '给「' + name + '」倒了杯咖啡',
+  },
 };
+
+/** 互动被服务端拒绝（对方离线 / 冷却中）时的统一提示 */
+const INTERACT_REJECTED_TEXT = '对方不在线，或手速太快啦～';
+
+/** v3.6 互动本地冷却（与 INTERACT_COOLDOWN_MS 对齐）：点击后立即置灰，不等 ack */
+const INTERACT_COOLDOWN_MS = 1000;
 
 /** v2.1 §5.3.1：对方还留在结算页时，准备页的统一提示（tip 与按钮 tooltip 共用同一句） */
 const SETTLE_WATCH_TIP = '对方还在看上一局的结算，等你俩都点『再来一局』才能开始～';
@@ -119,8 +153,8 @@ interface SubmitLimitOption {
   active: boolean;
 }
 
-interface EmoteOption {
-  kind: EmoteKind;
+interface InteractOption {
+  kind: InteractKind;
   label: string;
   emoji: string;
   disabled: boolean;
@@ -136,6 +170,7 @@ function createGameSession() {
   const sound = useSound();
   const countdown = useCountdown();
   const confetti = useConfetti();
+  const interactionFx = useInteractionFx();
 
   /* ---------------- 基础状态 ---------------- */
 
@@ -170,8 +205,8 @@ function createGameSession() {
   const revealTick = ref(0);
   const now = ref(Date.now());
   const joinFocusTick = ref(0);
-  /** v3.4 快捷表情冷却截止时刻（ms）：8s 内所有表情按钮置灰 */
-  const emoteCooldownUntil = ref(0);
+  /** v3.6 玩家互动冷却截止时刻（ms）：1s 内三个互动按钮全部置灰 */
+  const interactCooldownUntil = ref(0);
   /** 「结束本局」二次确认截止时刻（ms）：now < 它时按钮处于确认态 */
   const endConfirmUntil = ref(0);
   /** 点过「再来一局」后，等对方也退出结算页再自动准备 */
@@ -367,17 +402,17 @@ function createGameSession() {
     () => opened.value && !showReveal.value && !submittedYou.value && opponentDone.value,
   );
 
-  /** v3.4 快捷表情选项（等待对方时可用；冷却中全部置灰） */
-  const emoteOptions = computed<EmoteOption[]>(() =>
-    EMOTE_KINDS.map((kind) => ({
+  /** v3.6 玩家互动选项（等待对方时可用；1s 冷却中全部置灰） */
+  const interactOptions = computed<InteractOption[]>(() =>
+    INTERACT_KINDS.map((kind) => ({
       kind,
-      label: EMOTE_LABELS[kind].label,
-      emoji: EMOTE_LABELS[kind].emoji,
-      disabled: now.value < emoteCooldownUntil.value,
+      label: INTERACT_LABELS[kind].label,
+      emoji: INTERACT_LABELS[kind].emoji,
+      disabled: now.value < interactCooldownUntil.value,
     })),
   );
-  /** 只在「输入已开放、还没揭晓、对方在线」时展示表情条 */
-  const emoteVisible = computed(
+  /** 只在「输入已开放、还没揭晓、对方在线」时展示互动条 */
+  const interactVisible = computed(
     () => opened.value && !showReveal.value && opponentConnected.value,
   );
 
@@ -870,20 +905,28 @@ function createGameSession() {
     return true;
   }
 
-  /** v3.4 快捷表情：只在等待对方时可用；8s 冷却由服务端限流，前端同步置灰 */
-  function sendEmote(kind: EmoteKind): void {
-    if (!emoteVisible.value) return;
-    socketApi.emitAck('room:emote', { kind }, (res) => {
+  /**
+   * v3.6 玩家互动：只在等待对方时可用。
+   * 冷却反馈不等 ack —— 点下立刻本地置 1s 冷却，避免连点刷请求；
+   * 白名单/相位/冷却的最终裁决在服务端，accepted:false 只提示、不自动重试。
+   */
+  function sendInteract(kind: InteractKind): void {
+    if (!interactVisible.value) return;
+    if (now.value < interactCooldownUntil.value) return;
+    const at = Date.now();
+    now.value = at;
+    interactCooldownUntil.value = at + INTERACT_COOLDOWN_MS;
+    socketApi.emitAck('room:interact', { kind }, (res) => {
       if (!res.ok) {
-        toastApi.toast(res.message || '表情没发出去');
+        toastApi.toast(res.message || '互动没发出去，再试一次');
         return;
       }
       if (!res.accepted) {
-        toastApi.toast('对方不在线或别催太急～');
+        toastApi.toast(INTERACT_REJECTED_TEXT);
         return;
       }
-      emoteCooldownUntil.value = Date.now() + 8000;
-      toastApi.toast('已发出：' + EMOTE_LABELS[kind].label);
+      const op = opponent.value;
+      toastApi.toast(INTERACT_LABELS[kind].sent((op && op.name) || '对方'));
     });
   }
 
@@ -1094,6 +1137,20 @@ function createGameSession() {
     toastApi.toast(payload.text, payload.kind || 'info');
   }
 
+  /**
+   * v3.6：被互动方收到 room:interacted —— 全屏特效 + 音效 + 提示。
+   * 载荷来自网络，kind 必须先过白名单再用；提示文案一律由前端按白名单生成。
+   */
+  function onInteracted(payload: InteractedPayload): void {
+    const rawKind = payload && (payload.kind as string);
+    if (!rawKind || !(INTERACT_KINDS as readonly string[]).includes(rawKind)) return;
+    const kind = rawKind as InteractKind;
+    const name = String((payload && payload.name) || '').trim() || '对方';
+    interactionFx.play(kind);
+    sound.interact(kind);
+    toastApi.toast(INTERACT_LABELS[kind].received(name));
+  }
+
   function onRoomError(payload: RoomErrorPayload): void {
     const code = payload && payload.code;
     const message = (payload && payload.message) || '房间出了点问题';
@@ -1124,6 +1181,7 @@ function createGameSession() {
       onOpponentSubmitted,
       onReveal: onRevealEvent,
       onNotice,
+      onInteracted,
       onRoomError,
     });
   }
@@ -1248,8 +1306,8 @@ function createGameSession() {
     waitingOn,
     waitingText,
     opponentHintOn,
-    emoteOptions,
-    emoteVisible,
+    interactOptions,
+    interactVisible,
     endAvailable,
     endConfirmPending,
     timerVisible,
@@ -1288,7 +1346,7 @@ function createGameSession() {
     leaveRoom: () => leaveNow('已离开房间'),
     onReady,
     submitWord,
-    sendEmote,
+    sendInteract,
     toggleAgree,
     nextRound,
     requestEndGame,

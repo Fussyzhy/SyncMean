@@ -50,9 +50,10 @@ import type {
   CreateOk,
   CreatePayload,
   EmptyPayload,
-  EmoteOk,
-  EmotePayload,
   HistoryItem,
+  InteractOk,
+  InteractPayload,
+  InteractedPayload,
   JoinOk,
   JoinPayload,
   NoticePayload,
@@ -133,7 +134,7 @@ interface ClientPayloads {
   'round:agree': AgreePayload;
   'round:next': EmptyPayload;
   'game:restart': EmptyPayload;
-  'room:emote': EmotePayload;
+  'room:interact': InteractPayload;
   'game:end': EmptyPayload;
 }
 
@@ -147,7 +148,7 @@ interface AckResults {
   'round:agree': ActionResult<AgreeOk>;
   'round:next': ActionResult<SimpleOk>;
   'game:restart': ActionResult<RestartOk>;
-  'room:emote': ActionResult<EmoteOk>;
+  'room:interact': ActionResult<InteractOk>;
   'game:end': ActionResult<SimpleOk>;
 }
 
@@ -206,6 +207,10 @@ function stateOf(entry: { payload: unknown }): PublicRoomState {
 
 function noticeOf(entry: { payload: unknown }): NoticePayload {
   return entry.payload as NoticePayload;
+}
+
+function interactedOf(entry: { payload: unknown }): InteractedPayload {
+  return entry.payload as InteractedPayload;
 }
 
 function errorOf(entry: { payload: unknown }): RoomErrorPayload {
@@ -714,7 +719,7 @@ async function main(): Promise<void> {
   eq(normalize('   '), '', '纯空白归一化为空串');
   ok(normalize('Ａpple') === normalize('apple'), '全角半角不影响判定');
   ok(constants.COUNTDOWN_MS === 3000, 'COUNTDOWN_MS = 3000');
-  ok(constants.EMOTE_COOLDOWN_MS === 8000, 'EMOTE_COOLDOWN_MS = 8000');
+  ok(constants.INTERACT_COOLDOWN_MS === 1000, 'INTERACT_COOLDOWN_MS = 1000');
   ok(constants.DEFAULT_SUBMIT_MS === 60000, 'DEFAULT_SUBMIT_MS = 60000');
   eq(constants.SUBMIT_LIMIT_OPTIONS, [0, 60000, 180000, 300000], 'SUBMIT_LIMIT_OPTIONS 仅 0/1/3/5 分钟');
   ok(!hasOwn(constants, 'SUBMIT_MS'), 'constants 不再导出 SUBMIT_MS');
@@ -1931,34 +1936,40 @@ async function main(): Promise<void> {
   gOpen.shutdown();
   pass('_openRound 时限分支');
 
-  // ---------- 11d. v3.4 快捷表情 room:emote 协议级 ----------
-  step('11d. room:emote：lobby 拒绝、对方离线不送达、重连后可送达、冷却与非法 kind');
+  // ---------- 11d. v3.6 玩家互动 room:interact 协议级 ----------
+  step('11d. room:interact：lobby 拒绝、对方离线不送达、重连后可送达、1s 冷却与非法 kind');
 
   // lobby 阶段：即使 kind 合法也拒绝
-  asOk(await emitAck(D, 'room:create', { name: '表情房主' }));
-  const lobbyEmote = asError(await emitAck(D, 'room:emote', { kind: 'nudge' }));
-  eq(lobbyEmote.error, 'BAD_PHASE', 'lobby 阶段发 room:emote -> BAD_PHASE');
-  eq((await emitAck(D, 'room:leave', {})).ok, true, '表情 lobby 校验房用完即离开');
-  eq(asError(await emitAck(D, 'room:emote', { kind: 'nudge' })).error, 'NOT_IN_ROOM', '不在房间发 room:emote -> NOT_IN_ROOM');
+  asOk(await emitAck(D, 'room:create', { name: '互动房主' }));
+  const lobbyInteract = asError(await emitAck(D, 'room:interact', { kind: 'poke' }));
+  eq(lobbyInteract.error, 'BAD_PHASE', 'lobby 阶段发 room:interact -> BAD_PHASE');
+  eq((await emitAck(D, 'room:leave', {})).ok, true, '互动 lobby 校验房用完即离开');
+  eq(
+    asError(await emitAck(D, 'room:interact', { kind: 'poke' })).error,
+    'NOT_IN_ROOM',
+    '不在房间发 room:interact -> NOT_IN_ROOM'
+  );
 
   const M = await connectClient('M');
   const N = await connectClient('N');
-  const emoteCreate = asOk(await emitAck(M, 'room:create', { name: '表情甲' }));
-  const emoteCode = emoteCreate.code;
-  const emoteJoinN = asOk(await emitAck(N, 'room:join', { code: emoteCode, name: '表情乙' }));
-  const tokenN = emoteJoinN.token;
-  const markEmoteOpen = M.mark();
-  eq((await emitAck(M, 'player:ready', { ready: true })).ok, true, '表情房 A ready');
-  eq((await emitAck(N, 'player:ready', { ready: true })).ok, true, '表情房 B ready');
+  const interactCreate = asOk(await emitAck(M, 'room:create', { name: '互动甲' }));
+  const interactCode = interactCreate.code;
+  const interactJoinN = asOk(
+    await emitAck(N, 'room:join', { code: interactCode, name: '互动乙' })
+  );
+  const interactTokenN = interactJoinN.token;
+  const markInteractOpen = M.mark();
+  eq((await emitAck(M, 'player:ready', { ready: true })).ok, true, '互动房 A ready');
+  eq((await emitAck(N, 'player:ready', { ready: true })).ok, true, '互动房 B ready');
   await waitEvent(M, 'round:open', (p) => Boolean(p) && p.round === 1, {
-    since: markEmoteOpen,
+    since: markInteractOpen,
     timeout: 6000,
-    hint: '表情房进入提交阶段',
+    hint: '互动房进入提交阶段',
   });
 
-  // 对方离线：不送达且不发 notice（冷却也不消耗）
+  // 对方离线：不送达且不发 room:interacted（失败也不消耗冷却）
   N.disconnect();
-  const markEmoteOffline = M.mark();
+  const markInteractOffline = M.mark();
   await waitEvent(
     M,
     'room:state',
@@ -1966,80 +1977,130 @@ async function main(): Promise<void> {
       const b = s.players.find((p) => p.seat === 'b');
       return b !== undefined && b.connected === false;
     },
-    { since: markEmoteOffline, timeout: 3000, hint: 'A 看到 B 离线' }
+    { since: markInteractOffline, timeout: 3000, hint: 'A 看到 B 离线' }
   );
   eq(
-    await emitAck(M, 'room:emote', { kind: 'nudge' }),
+    await emitAck(M, 'room:interact', { kind: 'poke' }),
     { ok: true, accepted: false },
-    '对方离线时 room:emote 返回 accepted:false'
+    '对方离线时 room:interact 返回 accepted:false'
   );
   eq(
     M.log
-      .slice(markEmoteOpen)
-      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('催你啦'))
-      .length,
+      .slice(markInteractOffline)
+      .filter((entry) => entry.event === 'room:interacted').length,
     0,
-    '对方离线时不发送表情 notice'
+    '对方离线时不发送 room:interacted'
   );
 
-  // 重连后同一条表情可以正常送达（说明离线失败不消耗冷却）
+  // 重连后同一种互动可以正常送达（说明离线失败不消耗冷却）
   const N2 = await connectClient('N2');
-  const markN2Join = N2.mark();
   const rejoinN2 = asOk(
-    await emitAck(N2, 'room:join', { code: emoteCode, name: '表情乙', token: tokenN })
+    await emitAck(N2, 'room:join', { code: interactCode, name: '互动乙', token: interactTokenN })
   );
   eq(rejoinN2.state.phase, 'submitting', 'B 重连后仍在提交阶段');
-  const markEmoteA = M.mark();
-  const markEmoteB = N2.mark();
+  const markInteractA = M.mark();
+  const markInteractB = N2.mark();
   eq(
-    await emitAck(M, 'room:emote', { kind: 'nudge' }),
+    await emitAck(M, 'room:interact', { kind: 'poke' }),
     { ok: true, accepted: true },
-    'A 发 nudge -> accepted:true'
+    'A 发 poke -> accepted:true'
   );
-  const nudgeNotice = await waitEvent(
-    N2,
-    'room:notice',
-    (p) => Boolean(p) && p.text.includes('催你啦'),
-    { since: markEmoteB, timeout: 3000, hint: 'B 收到 nudge' }
-  );
-  eq(nudgeNotice, { kind: 'info', text: '表情甲 催你啦：快一点～' }, 'B 收到含发送者昵称的 info notice');
+  // 1s 冷却：紧接着再发 -> accepted:false，且不产生新的 room:interacted
   eq(
-    M.log
-      .slice(markEmoteA)
-      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('催你啦'))
-      .length,
-    0,
-    '发送者不回显自己的表情'
-  );
-
-  // 8s 冷却：立刻再发 -> accepted:false，且不产生新 notice
-  eq(
-    await emitAck(M, 'room:emote', { kind: 'thinking' }),
+    await emitAck(M, 'room:interact', { kind: 'tomato' }),
     { ok: true, accepted: false },
     '冷却中再发 -> accepted:false'
   );
+  // 非法 kind（白名单外自由文本）：与冷却无关，直接报错
+  const badInteract = asError(
+    await emitAck(M, 'room:interact', { kind: 'spam' as unknown as InteractPayload['kind'] })
+  );
+  eq(badInteract.error, 'INVALID_INTERACT', '未知 kind -> INVALID_INTERACT');
+  eq(badInteract.message, '互动类型无效', 'INVALID_INTERACT 中文文案与协议一致');
+
+  const pokePayload = await waitEvent(
+    N2,
+    'room:interacted',
+    (p) => Boolean(p) && p.kind === 'poke',
+    { since: markInteractB, timeout: 3000, hint: 'B 收到 poke' }
+  );
+  eq(pokePayload, { kind: 'poke', name: '互动甲' }, 'B 收到 {kind,name} 定向载荷');
   eq(
     N2.log
-      .slice(markEmoteB)
-      .filter((entry) => entry.event === 'room:notice' && noticeOf(entry).text.includes('还在想'))
+      .slice(markInteractB)
+      .filter((entry) => entry.event === 'room:interacted' && interactedOf(entry).kind === 'tomato')
       .length,
     0,
-    '冷却中不发送 notice'
+    '冷却中不发送 room:interacted'
+  );
+  eq(
+    M.log
+      .slice(markInteractA)
+      .filter((entry) => entry.event === 'room:interacted').length,
+    0,
+    '发送者不回显自己的互动'
   );
 
-  // 非法 kind
-  const badEmote = asError(
-    await emitAck(M, 'room:emote', { kind: 'spam' as unknown as EmotePayload['kind'] })
+  // 冷却结束后三种 kind 都能送达，且 kind / name 正确
+  await sleep(constants.INTERACT_COOLDOWN_MS + 150);
+  eq(
+    await emitAck(M, 'room:interact', { kind: 'tomato' }),
+    { ok: true, accepted: true },
+    '冷却结束发 tomato -> accepted:true'
   );
-  eq(badEmote.error, 'INVALID_EMOTE', '未知 kind -> INVALID_EMOTE');
-  eq(badEmote.message, '快捷表情无效', 'INVALID_EMOTE 中文文案与协议一致');
+  eq(
+    await waitEvent(N2, 'room:interacted', (p) => Boolean(p) && p.kind === 'tomato', {
+      since: markInteractB,
+      timeout: 3000,
+      hint: 'B 收到 tomato',
+    }),
+    { kind: 'tomato', name: '互动甲' },
+    'B 收到 tomato 且载荷为 {kind,name}'
+  );
+  await sleep(constants.INTERACT_COOLDOWN_MS + 150);
+  eq(
+    await emitAck(M, 'room:interact', { kind: 'coffee' }),
+    { ok: true, accepted: true },
+    '冷却结束发 coffee -> accepted:true'
+  );
+  eq(
+    await waitEvent(N2, 'room:interacted', (p) => Boolean(p) && p.kind === 'coffee', {
+      since: markInteractB,
+      timeout: 3000,
+      hint: 'B 收到 coffee',
+    }),
+    { kind: 'coffee', name: '互动甲' },
+    'B 收到 coffee 且载荷为 {kind,name}'
+  );
+  eq(
+    M.log
+      .slice(markInteractA)
+      .filter((entry) => entry.event === 'room:interacted').length,
+    0,
+    'room:interacted 全程只发给对方（发送者不回显）'
+  );
 
-  // 清理表情房
-  eq((await emitAck(M, 'room:leave', {})).ok, true, '表情房 A 离开');
-  eq((await emitAck(N2, 'room:leave', {})).ok, true, '表情房 B 离开');
+  // 仅 submitting 阶段允许：揭晓后再发 -> BAD_PHASE
+  const markInteractReveal = N2.mark();
+  eq((await emitAck(N2, 'round:submit', { word: '冬天' })).ok, true, '互动房 B 提交');
+  eq((await emitAck(M, 'round:submit', { word: '夏天' })).ok, true, '互动房 A 提交');
+  await waitEvent(N2, 'round:reveal', () => true, {
+    since: markInteractReveal,
+    timeout: 3000,
+    hint: '互动房进入揭晓',
+  });
+  eq(
+    asError(await emitAck(M, 'room:interact', { kind: 'poke' })).error,
+    'BAD_PHASE',
+    'reveal 阶段发 room:interact -> BAD_PHASE'
+  );
+
+  // 清理互动房
+  eq((await emitAck(M, 'room:leave', {})).ok, true, '互动房 A 离开');
+  eq((await emitAck(N2, 'room:leave', {})).ok, true, '互动房 B 离开');
   await sleep(200);
-  eq((await fetchJson('/health')).body.rooms, 0, '表情用例结束后房间已删除');
-  pass('快捷表情 room:emote');
+  eq((await fetchJson('/health')).body.rooms, 0, '互动用例结束后房间已删除');
+  pass('玩家互动 room:interact');
 
   // ---------- 11e. v3.4 未通关结束本局 game:end 协议级 ----------
   step('11e. game:end：reveal 阶段未通关结束本局 -> 双方 won 视角 -> restart 正常 -> 非 active 相位拒绝');
@@ -3001,65 +3062,112 @@ async function main(): Promise<void> {
   gEnd.shutdown();
   pass('endGame 直接驱动');
 
-  // ---------- 21. v3.4 emote 直接驱动 ----------
-  step('21. emote 直接驱动：三种预设文案、只发对方、冷却与无对手 / 离线');
-  const gEmote = new GameModule();
-  const emoteRoomCreated = asOk(gEmote.createRoom('em-a', { name: '甲' }));
-  gEmote.joinRoom('em-b', { code: emoteRoomCreated.code, name: '乙' });
-  const emoteRoom = gEmote.rooms.get(emoteRoomCreated.code) as Room;
-  const emoteNotices: { seat: Seat; payload: NoticePayload }[] = [];
-  gEmote.emitToPlayer = (
+  // ---------- 21. v3.6 玩家互动 interact 直接驱动 ----------
+  step('21. interact 直接驱动：三种 kind 都送达、只发对方、1s 冷却与无对手 / 离线');
+  const gInteract = new GameModule();
+  const interactRoomCreated = asOk(gInteract.createRoom('in-a', { name: '甲' }));
+  gInteract.joinRoom('in-b', { code: interactRoomCreated.code, name: '乙' });
+  const interactRoom = gInteract.rooms.get(interactRoomCreated.code) as Room;
+  const interactedEvents: { seat: Seat; payload: InteractedPayload }[] = [];
+  gInteract.emitToPlayer = (
     player: Player,
     event: keyof ServerToClientEvents,
     payload: unknown
   ): void => {
-    if (event === 'room:notice') {
-      emoteNotices.push({ seat: player.seat, payload: payload as NoticePayload });
+    if (event === 'room:interacted') {
+      interactedEvents.push({ seat: player.seat, payload: payload as InteractedPayload });
     }
   };
-  const emotePlayerOf = (seat: Seat): Player => {
-    const found = emoteRoom.players.find((p) => p.seat === seat);
+  const interactPlayerOf = (seat: Seat): Player => {
+    const found = interactRoom.players.find((p) => p.seat === seat);
     if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
     return found;
   };
-  const emoteA = emotePlayerOf('a');
+  const interactA = interactPlayerOf('a');
 
-  eq(asError(gEmote.emote('em-a', 'nudge')).error, 'BAD_PHASE', 'lobby 阶段 emote -> BAD_PHASE');
-  eq(asError(gEmote.emote('ghost-socket', 'nudge')).error, 'NOT_IN_ROOM', '不在房间 emote -> NOT_IN_ROOM');
-  emoteRoom.phase = 'submitting';
-  eq(asError(gEmote.emote('em-a', 'spam')).error, 'INVALID_EMOTE', '未知 kind -> INVALID_EMOTE');
-  eq(asError(gEmote.emote('em-a', undefined)).error, 'INVALID_EMOTE', '缺省 kind -> INVALID_EMOTE');
-  eq(asError(gEmote.emote('em-a', 123)).error, 'INVALID_EMOTE', '非字符串 kind -> INVALID_EMOTE');
-
-  eq(gEmote.emote('em-a', 'nudge'), { ok: true, accepted: true }, 'nudge 送达');
   eq(
-    emoteNotices.at(-1),
-    { seat: 'b', payload: { kind: 'info', text: '甲 催你啦：快一点～' } },
-    'nudge 文案与目标座位正确'
+    asError(gInteract.interact('in-a', 'poke')).error,
+    'BAD_PHASE',
+    'lobby 阶段 interact -> BAD_PHASE'
   );
-  eq(gEmote.emote('em-a', 'thinking'), { ok: true, accepted: false }, '冷却中不送达');
-  emoteA.lastEmoteAt = Date.now() - constants.EMOTE_COOLDOWN_MS - 1;
-  eq(gEmote.emote('em-a', 'thinking'), { ok: true, accepted: true }, '冷却结束可送达');
-  eq(emoteNotices.at(-1)?.payload.text, '甲 说：还在想，别急～', 'thinking 文案');
-  emoteA.lastEmoteAt = null;
-  eq(gEmote.emote('em-a', 'cheer'), { ok: true, accepted: true }, 'cheer 送达');
-  eq(emoteNotices.at(-1)?.payload.text, '甲 给你加油：稳住！', 'cheer 文案');
-  eq(emoteNotices.map((entry) => entry.seat), ['b', 'b', 'b'], '表情只发给对方，发送者不回显');
+  eq(
+    asError(gInteract.interact('ghost-socket', 'poke')).error,
+    'NOT_IN_ROOM',
+    '不在房间 interact -> NOT_IN_ROOM'
+  );
+  interactRoom.phase = 'submitting';
+  const badInteractKind = asError(gInteract.interact('in-a', 'spam'));
+  eq(badInteractKind.error, 'INVALID_INTERACT', '未知 kind -> INVALID_INTERACT');
+  eq(badInteractKind.message, '互动类型无效', 'INVALID_INTERACT 中文文案与协议一致');
+  eq(
+    asError(gInteract.interact('in-a', undefined)).error,
+    'INVALID_INTERACT',
+    '缺省 kind -> INVALID_INTERACT'
+  );
+  eq(
+    asError(gInteract.interact('in-a', 123)).error,
+    'INVALID_INTERACT',
+    '非字符串 kind -> INVALID_INTERACT'
+  );
+  eq(interactedEvents.length, 0, '非法 kind 不产生 room:interacted');
+
+  // 成功：只发给对方，载荷只有 {kind, name}（服务端不再生成文案）
+  eq(gInteract.interact('in-a', 'poke'), { ok: true, accepted: true }, 'poke 送达');
+  eq(
+    interactedEvents.at(-1),
+    { seat: 'b', payload: { kind: 'poke', name: '甲' } },
+    'poke 定向发给对方且载荷为 {kind,name}'
+  );
+  const lastInteractAfterPoke = interactA.lastInteractAt;
+  ok(lastInteractAfterPoke !== null, '成功互动后记录 lastInteractAt');
+
+  // 冷却中不送达，且失败不消耗冷却（lastInteractAt 不变）
+  eq(gInteract.interact('in-a', 'tomato'), { ok: true, accepted: false }, '1s 内重复互动不送达');
+  eq(
+    interactA.lastInteractAt,
+    lastInteractAfterPoke,
+    '冷却失败不消耗冷却（lastInteractAt 不变）'
+  );
+  eq(interactedEvents.length, 1, '冷却中不发送 room:interacted');
+
+  // 冷却阈值为 1000ms：未满 1000ms 不送达；回拨 1001ms 即可送达；且不再是旧的 8s
+  interactA.lastInteractAt = Date.now() - (constants.INTERACT_COOLDOWN_MS - 500);
+  eq(gInteract.interact('in-a', 'tomato'), { ok: true, accepted: false }, '冷却未满 1000ms 不送达');
+  interactA.lastInteractAt = Date.now() - constants.INTERACT_COOLDOWN_MS - 1;
+  eq(gInteract.interact('in-a', 'tomato'), { ok: true, accepted: true }, '回拨 1001ms 后可送达');
+  eq(
+    interactedEvents.at(-1),
+    { seat: 'b', payload: { kind: 'tomato', name: '甲' } },
+    'tomato 载荷正确'
+  );
+  interactA.lastInteractAt = Date.now() - 2000;
+  eq(gInteract.interact('in-a', 'coffee'), { ok: true, accepted: true }, 'coffee 送达（回拨 2s 已过 1s 冷却）');
+  eq(
+    interactedEvents.at(-1),
+    { seat: 'b', payload: { kind: 'coffee', name: '甲' } },
+    'coffee 载荷正确'
+  );
+  eq(
+    interactedEvents.map((entry) => entry.seat),
+    ['b', 'b', 'b'],
+    '三种 kind 都只发给对方，发送者不回显'
+  );
 
   // 对方离线：不送达、不发送，也不消耗冷却
-  gEmote.disconnect('em-b');
-  const noticesBeforeOffline = emoteNotices.length;
-  emoteA.lastEmoteAt = null;
-  eq(gEmote.emote('em-a', 'nudge'), { ok: true, accepted: false }, '对方离线 -> accepted:false');
-  eq(emoteNotices.length, noticesBeforeOffline, '对方离线时不发送 notice');
+  gInteract.disconnect('in-b');
+  const interactedBeforeOffline = interactedEvents.length;
+  interactA.lastInteractAt = null;
+  eq(gInteract.interact('in-a', 'poke'), { ok: true, accepted: false }, '对方离线 -> accepted:false');
+  eq(interactedEvents.length, interactedBeforeOffline, '对方离线时不发送 room:interacted');
+  eq(interactA.lastInteractAt, null, '对方离线失败不消耗冷却');
 
   // 单人房（没有对手）
-  const soloCreated = asOk(gEmote.createRoom('em-solo', { name: '丙' }));
-  const soloRoom = gEmote.rooms.get(soloCreated.code) as Room;
+  const soloCreated = asOk(gInteract.createRoom('in-solo', { name: '丙' }));
+  const soloRoom = gInteract.rooms.get(soloCreated.code) as Room;
   soloRoom.phase = 'submitting';
-  eq(gEmote.emote('em-solo', 'nudge'), { ok: true, accepted: false }, '没有对手 -> accepted:false');
-  gEmote.shutdown();
-  pass('emote 直接驱动');
+  eq(gInteract.interact('in-solo', 'poke'), { ok: true, accepted: false }, '没有对手 -> accepted:false');
+  gInteract.shutdown();
+  pass('interact 直接驱动');
 
   // ---------- 22. v3.5 管理后台：命名空间鉴权 + 初始 admin:rooms ----------
   step('22. 管理后台：/admin 鉴权（无 key / 错 key / 正确 key）与初始 admin:rooms 推送');

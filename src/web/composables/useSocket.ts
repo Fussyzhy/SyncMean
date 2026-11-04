@@ -18,6 +18,7 @@ import type {
   ActionResult,
   ClientToServerEvents,
   CountdownPayload,
+  InteractedPayload,
   NoticePayload,
   PublicRoomState,
   RevealPayload,
@@ -59,6 +60,8 @@ export interface SocketHandlers {
   onOpponentSubmitted(): void;
   onReveal(payload: RevealPayload): void;
   onNotice(payload: NoticePayload): void;
+  /** v3.6：有人对你发起互动（服务端定向只发给被互动方） */
+  onInteracted(payload: InteractedPayload): void;
   onRoomError(payload: RoomErrorPayload): void;
 }
 
@@ -95,6 +98,7 @@ export function useSocket(): SocketApi {
     socket.on('round:opponent-submitted', () => handlers.onOpponentSubmitted());
     socket.on('round:reveal', (payload) => handlers.onReveal(payload));
     socket.on('room:notice', (payload) => handlers.onNotice(payload));
+    socket.on('room:interacted', (payload) => handlers.onInteracted(payload));
     socket.on('room:error', (payload) => handlers.onRoomError(payload));
     return socket;
   }

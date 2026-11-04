@@ -2,7 +2,8 @@
 /**
  * 应用根组件：
  * - 四个视图常驻 DOM（与旧 index.html 一致），按 state.phase 派发 view--active；
- * - 全局层：#btn-sound / #btn-theme / #net-banner / #countdown-overlay / #confetti / #toast；
+ * - 全局层：#btn-sound / #btn-theme / #net-banner / #countdown-overlay / #confetti /
+ *   #interact-fx（v3.6 互动特效）/ #toast；
  * - 启动旧 init() 的等价物 + 100ms 主循环（倒计时数字与提交进度条）。
  */
 import { onBeforeUnmount, watch } from 'vue';
@@ -12,6 +13,7 @@ import GameView from '@/components/GameView.vue';
 import SettleView from '@/components/SettleView.vue';
 import CountdownOverlay from '@/components/CountdownOverlay.vue';
 import ConfettiLayer from '@/components/ConfettiLayer.vue';
+import InteractionFx from '@/components/InteractionFx.vue';
 import ToastHost from '@/components/ToastHost.vue';
 import NetBanner from '@/components/NetBanner.vue';
 import SoundToggle from '@/components/SoundToggle.vue';
@@ -71,5 +73,6 @@ onBeforeUnmount(() => {
 
   <CountdownOverlay />
   <ConfettiLayer />
+  <InteractionFx />
   <ToastHost />
 </template>

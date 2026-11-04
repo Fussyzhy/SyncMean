@@ -24,9 +24,9 @@ import type {
   CreateOk,
   CreatePayload,
   EmptyPayload,
-  EmoteOk,
-  EmotePayload,
   InterServerEvents,
+  InteractOk,
+  InteractPayload,
   JoinOk,
   JoinPayload,
   ReadyPayload,
@@ -250,8 +250,10 @@ io.on('connection', (socket) => {
   );
 
   socket.on(
-    'room:emote',
-    handler<EmotePayload, ActionResult<EmoteOk>>((data) => game.emote(socket.id, data.kind))
+    'room:interact',
+    handler<InteractPayload, ActionResult<InteractOk>>((data) =>
+      game.interact(socket.id, data.kind)
+    )
   );
 
   socket.on(

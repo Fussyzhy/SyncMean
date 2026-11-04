@@ -16,7 +16,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 
 import type { AdminDeleteOk, AdminRoomDetail, AdminRoomSummary } from '../shared/admin.js';
-import { DEFAULT_SUBMIT_MS, EMOTE_KINDS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
+import { DEFAULT_SUBMIT_MS, INTERACT_KINDS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
 import type {
   ActionError,
   ActionResult,
@@ -25,10 +25,10 @@ import type {
   Basis,
   CreateOk,
   CreatePayload,
-  EmoteKind,
-  EmoteOk,
   ErrorCode,
   HistoryItem,
+  InteractKind,
+  InteractOk,
   JoinOk,
   JoinPayload,
   Phase,
@@ -45,7 +45,7 @@ import type {
 // ==================== 时间参数（PROTOCOL.md §3，集中于此） ====================
 const COUNTDOWN_MS = 3000; // 3-2-1
 const START_DELAY = 300; // 双方准备后稍等再倒计时
-const EMOTE_COOLDOWN_MS = 8000; // v3.4：快捷表情冷却（8 秒内重复发送不送达）
+const INTERACT_COOLDOWN_MS = 1000; // v3.6：玩家互动冷却（1 秒内重复互动不送达）
 
 // 全员离线后的房间保留时长与清理扫描周期（PROTOCOL.md §8）
 const OFFLINE_ROOM_TTL_MS = 10 * 60 * 1000;
@@ -77,7 +77,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   BAD_PHASE: '当前阶段无法进行此操作',
   INVALID_WORD: '词需为 1–12 个字符',
   INVALID_SUBMIT_LIMIT: '填词时限只能是不限时 / 1 分钟 / 3 分钟 / 5 分钟',
-  INVALID_EMOTE: '快捷表情无效',
+  INVALID_INTERACT: '互动类型无效',
   REPLACED: '你的连接已在别处打开，当前会话被顶替',
   OPPONENT_LEFT: '对手已离开房间',
   ROOM_DELETED: '房间已解散',
@@ -87,7 +87,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
 export const constants = {
   COUNTDOWN_MS,
   START_DELAY,
-  EMOTE_COOLDOWN_MS,
+  INTERACT_COOLDOWN_MS,
   OFFLINE_ROOM_TTL_MS,
   SWEEP_INTERVAL_MS,
   SETTLE_OFFLINE_GRACE_MS,
@@ -121,8 +121,8 @@ export interface Player {
   settleDismissed: boolean;
   /** v3.3：本次离线开始时刻（毫秒）；在线 / 从未离线时为 null。用于离线兜底判定 */
   offlineAt: number | null;
-  /** v3.4：上次成功发送快捷表情的时刻（毫秒）；冷却判定用，重连后保留 */
-  lastEmoteAt: number | null;
+  /** v3.6：上次成功发起互动的时刻（毫秒）；冷却判定用，重连后保留 */
+  lastInteractAt: number | null;
 }
 
 /** v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角 */
@@ -357,7 +357,7 @@ export class Game {
       isHost: true,
       settleDismissed: false, // v2.1：是否已退出结算页（PROTOCOL.md §5.3.1）
       offlineAt: null, // v3.3：新建玩家在线，尚未离线
-      lastEmoteAt: null, // v3.4：尚未发过快捷表情
+      lastInteractAt: null, // v3.6：尚未发起过互动
     };
 
     const room: Room = {
@@ -439,7 +439,7 @@ export class Game {
       isHost: room.players.length === 0 || !room.players.some((p) => p.isHost),
       settleDismissed: false, // v2.1：新玩家从不属于上一局的结算页
       offlineAt: null, // v3.3：新玩家在线，尚未离线
-      lastEmoteAt: null, // v3.4：尚未发过快捷表情
+      lastInteractAt: null, // v3.6：尚未发起过互动
     };
     room.players.push(player);
     // v2.1：新玩家加入同一房间 → 上一局的结算快照作废，没人该卡在假 won
@@ -549,49 +549,33 @@ export class Game {
   }
 
   /**
-   * v3.4：快捷表情（PROTOCOL.md §5.1）。
+   * v3.6：玩家互动（PROTOCOL.md §5.1）。
    * 只在双盲提交阶段开放；kind 必须是预设白名单（绝不接受自由文本）。
-   * 只发给对方，发送者不回显；8 秒冷却、对方离线都返回 {ok:true, accepted:false}。
+   * 服务端不生成任何文案：成功时只把 {kind, name} 定向发给对方（特效与提示由前端生成），
+   * 发送者不回显；1 秒冷却、对方离线都返回 {ok:true, accepted:false}（失败不消耗冷却）。
    */
-  emote(socketId: string | null, kind?: unknown): ActionResult<EmoteOk> {
+  interact(socketId: string | null, kind?: unknown): ActionResult<InteractOk> {
     const found = this._findBySocket(socketId);
     if (!found) return fail('NOT_IN_ROOM');
     const { room, player } = found;
     if (room.phase !== 'submitting') return fail('BAD_PHASE');
-    if (typeof kind !== 'string' || !(EMOTE_KINDS as readonly string[]).includes(kind)) {
-      return fail('INVALID_EMOTE');
+    if (typeof kind !== 'string' || !(INTERACT_KINDS as readonly string[]).includes(kind)) {
+      return fail('INVALID_INTERACT');
     }
-    const emoteKind = kind as EmoteKind;
+    const interactKind = kind as InteractKind;
 
     const opponent = room.players.find((p) => p.seat !== player.seat) || null;
     // 对方不存在（还没人加入 / 已离开）或已离线：不送达，但不算调用错误
     if (!opponent || !opponent.connected) return { ok: true, accepted: false };
 
     const now = Date.now();
-    if (player.lastEmoteAt != null && now - player.lastEmoteAt < EMOTE_COOLDOWN_MS) {
+    if (player.lastInteractAt != null && now - player.lastInteractAt < INTERACT_COOLDOWN_MS) {
       return { ok: true, accepted: false };
     }
 
-    player.lastEmoteAt = now;
-    this._emitPlayer(opponent, 'room:notice', {
-      kind: 'info',
-      text: this._emoteText(player.name, emoteKind),
-    });
+    player.lastInteractAt = now;
+    this._emitPlayer(opponent, 'room:interacted', { kind: interactKind, name: player.name });
     return { ok: true, accepted: true };
-  }
-
-  /** v3.4：预设表情文案（含发送者昵称），只允许白名单 kind */
-  _emoteText(name: string, kind: EmoteKind): string {
-    switch (kind) {
-      case 'nudge':
-        return `${name} 催你啦：快一点～`;
-      case 'thinking':
-        return `${name} 说：还在想，别急～`;
-      case 'cheer':
-        return `${name} 给你加油：稳住！`;
-      default:
-        return '';
-    }
   }
 
   /**

@@ -154,29 +154,42 @@
   }
 }
 
-// ---- 等待时的快捷表情（3 个小胶囊，一行放不下就换行） ----
-.emote-row {
+// ---- v3.6 等待时的玩家互动（3 个竖排按钮：emoji 在上、文案在下） ----
+.interact-row {
   display: flex;
-  flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
 }
 
-.emote-btn {
+.interact-btn {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 38px;
-  padding: 0 10px;
-  border-radius: $radius-pill;
+  min-height: 44px;
+  padding: 6px 8px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: $radius-chip;
   border: 1px solid var(--line);
   background: var(--surface-control);
   color: var(--text);
   @include button-base;
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
+  line-height: 1.1;
   transition: border-color 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+
+  &__emoji {
+    font-size: 16px;
+    line-height: 1.15;
+  }
+
+  &__label {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
 
   &:hover:not(:disabled) {
     border-color: var(--ghost-hover-line);
@@ -190,6 +203,26 @@
   &:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+
+  // 发送反馈：按钮轻弹 + emoji 上飘淡出（keyframes 在 _animations.scss，由 fx 层维护）
+  &.is-sending {
+    animation: interactBtnSend 0.5s ease both;
+  }
+}
+
+// 窄屏：三个按钮并排时收紧内边距，保证 375px 下不横向溢出
+@media (max-width: $bp-mobile) {
+  .interact-row {
+    gap: 6px;
+  }
+
+  .interact-btn {
+    padding: 6px 4px;
+
+    &__label {
+      font-size: 11px;
+    }
   }
 }
 

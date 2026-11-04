@@ -8,7 +8,9 @@
  * 保留全部 63 条对局 check（+ --smoke 1 条），未放宽任何断言；DOM id 与 PROTOCOL.md §9 一致。
  * v3.2 追加：建房填词时限（默认 / 不限时）、不限时房间计时区、揭晓不自动推进、375px 时限选择组。
  * v3.3 追加：安全响应头与 /assets 长缓存、等待仪表盘（已等 m:ss）、对手掉线横幅与复制邀请入口。
- * v3.4 追加：快捷表情（催一下）、结束本局（二次确认）后双方结算、再来一局自动准备。
+ * v3.4 追加：结束本局（二次确认）后双方结算、再来一局自动准备。
+ * v3.6 追加：玩家互动（戳一戳 / 扔番茄 / 倒咖啡）——1s 冷却按钮态、接收方定向提示与三种全屏特效，
+ *           并留 22/23/24 三张特效截图作为视觉验收基线。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -745,7 +747,7 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   // 完整跑一轮「提交→双盲→揭晓」；advance=true 则揭晓后手动进下一轮。
   let timerChecked = false;
   let waitingChecked = false;
-  let emoteChecked = false;
+  let interactChecked = false;
   async function playRound(wa: string, wb: string, o?: RoundOptions): Promise<void> {
     const opt = o || {};
     await a.waitFor('(() => { const el = document.querySelector("#word-input"); if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; })()', 15000, 'A 输入开放（' + wa + '）');
@@ -766,17 +768,51 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
         `等待仪表盘显示已等时长（"${waitingText}"）`
       );
     }
-    if (!emoteChecked) {
-      emoteChecked = true;
-      check(await a.isVisible('#emote-row'), '等待时出现快捷表情行 #emote-row');
-      await a.click('#btn-emote-nudge');
-      const gotEmote = await b
-        .waitFor('document.body.innerText.includes("催你啦")', 4000, 'B 收到快捷表情')
-        .catch(() => false);
-      check(gotEmote !== false, '快捷表情送达对方（B 收到「催你啦」提示）');
-      await sleep(300);
-      const emoteDisabled = await a.eval('(() => { const el = document.querySelector("#btn-emote-nudge"); return !!el && !!el.disabled; })()');
-      check(emoteDisabled === true, '快捷表情发送后进入冷却（按钮 disabled）');
+    if (!interactChecked) {
+      interactChecked = true;
+      // v3.6（PROTOCOL §5.1/§5.2/§9/§10.15）：玩家互动 = 1s 冷却 + 接收方定向提示 + 全屏特效
+      check(await a.isVisible('#interact-row'), '等待时出现玩家互动行 #interact-row');
+      const interactButtons = await a.eval(`(() => ({
+        poke: !!document.querySelector('#btn-interact-poke'),
+        tomato: !!document.querySelector('#btn-interact-tomato'),
+        coffee: !!document.querySelector('#btn-interact-coffee'),
+      }))()`);
+      const interactBtnState = asRecord(interactButtons);
+      check(
+        interactBtnState.poke === true && interactBtnState.tomato === true && interactBtnState.coffee === true,
+        `互动行三个按钮齐全（${JSON.stringify(interactButtons)}）`
+      );
+      /** 特效元素是否出现在 DOM 里（动画结束后会被移除，waitFor 每 120ms 轮询足以捕捉 ≥1s 的特效） */
+      const fxSeen = (kind: string): string => `!!document.querySelector('#interact-fx .fx-item--${kind}')`;
+      // ① 戳一戳：A 约 1s 冷却；B 收到定向提示并播放 poke 特效，特效出现后立刻截图作为视觉基线
+      await a.click('#btn-interact-poke');
+      await sleep(350);
+      const pokeDisabled = await a.eval('(() => { const el = document.querySelector("#btn-interact-poke"); return !!el && !!el.disabled; })()');
+      check(pokeDisabled === true, '戳一戳发送后按钮进入冷却（~350ms 时 disabled）');
+      const pokeFx = await b.waitFor(fxSeen('poke'), 4000, 'B 端戳一戳特效').catch(() => false);
+      await b.screenshot('22-interact-fx-poke.png');
+      check(pokeFx !== false, 'B 端出现戳一戳特效（#interact-fx .fx-item--poke）');
+      check((await b.bodyText()).includes('戳了戳你'), 'B 端收到定向提示「戳了戳你」');
+      await sleep(1200);
+      const pokeReady = await a.eval('(() => { const el = document.querySelector("#btn-interact-poke"); return !!el && !el.disabled; })()');
+      check(pokeReady === true, '~1.2s 后 A 端戳一戳按钮恢复可用（1s 冷却释放）');
+      // ② 扔番茄（命中节拍 720ms：特效元素刚插入时番茄还在屏外，等靠近命中帧再截图）
+      await a.click('#btn-interact-tomato');
+      const tomatoFx = await b.waitFor(fxSeen('tomato'), 4000, 'B 端扔番茄特效').catch(() => false);
+      await sleep(620);
+      await b.screenshot('23-interact-fx-tomato.png');
+      check(tomatoFx !== false, 'B 端出现扔番茄特效（#interact-fx .fx-item--tomato）');
+      check((await b.bodyText()).includes('番茄'), 'B 端收到定向提示「番茄」');
+      // ③ 倒咖啡（液柱 30%~84% 流动、水滩 64%≈1280ms 才成形；等水滩摊开再截图）
+      await sleep(1200);
+      await a.click('#btn-interact-coffee');
+      const coffeeFx = await b.waitFor(fxSeen('coffee'), 4000, 'B 端倒咖啡特效').catch(() => false);
+      await sleep(1150);
+      await b.screenshot('24-interact-fx-coffee.png');
+      check(coffeeFx !== false, 'B 端出现倒咖啡特效（#interact-fx .fx-item--coffee）');
+      check((await b.bodyText()).includes('咖啡'), 'B 端收到定向提示「咖啡」');
+      // 等咖啡特效（约 2s）播完，避免残留元素影响后续截图/断言
+      await sleep(2200);
     }
     const bText = await b.bodyText();
     check(!bText.includes(wa), '双盲：B 提交前看不到 A 的词「' + wa + '」');
@@ -913,6 +949,13 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   check(!(await b.isVisible('#view-settle')), 'B 点完后自己退出结算页');
 
   log('\n[7c] 准备按钮 bug 回归（双方都不得残留 loading）');
+  // 稳定性（v3.6）：B 点完「再来一局」后，双方的自动准备（player:ready）请求可能还在途中，
+  // 此刻 is-busy 是「真实忙态」而不是 bug 4 的「永久残留」。先等这轮请求落地（最多 3s）再断言；
+  // 若真的永久残留，下面的 waitFor 会超时、断言照旧失败，回归强度不变。
+  const readySettled =
+    '(() => { const el = document.querySelector("#btn-ready"); if (!el) return false; return !el.classList.contains("is-busy") && el.getAttribute("aria-busy") !== "true"; })()';
+  await a.waitFor(readySettled, 3000, 'A 端自动准备请求落地（准备按钮退出 loading）').catch(() => undefined);
+  await b.waitFor(readySettled, 3000, 'B 端自动准备请求落地（准备按钮退出 loading）').catch(() => undefined);
   const readyA = await a.busyState('#btn-ready');
   const readyB = await b.busyState('#btn-ready');
   const readyStates: Array<[string, BusyState | null]> = [['A', readyA], ['B', readyB]];

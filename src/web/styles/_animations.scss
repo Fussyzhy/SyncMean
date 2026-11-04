@@ -82,3 +82,378 @@
     opacity: 0.85;
   }
 }
+
+// =============================================================================
+// v3.6 玩家互动特效（以上既有 keyframes 一律未改动）
+//
+// 节拍与 composables/useInteractionFx.ts 的 INTERACTION_FX_MS / HIT_MS 对齐：
+//   poke  1100ms（命中 330ms ≈ 30%）；
+//   tomato 1600ms（命中 720ms ≈ 45%）；
+//   coffee 2000ms（落地 1200ms = 60%）。
+// 关键帧里的中间量（位置/角度/粒子位移）都由内联 CSS 变量给出，
+// 这样随机性留在 JS，CSS 只描述曲线，且不需要在 calc() 里做 var() 乘除。
+// =============================================================================
+
+// ---- 摇屏：作用域是 body.is-fx-shake .app（不 transform body，避免 fixed 层跳位）----
+// 幅度取 ±8px + ≤1.2deg：再大 .app 的旋转包围盒会顶出 375px 视口（body 虽有 overflow-x:hidden，
+// 但 scrollWidth 会短暂 > innerWidth，容易被 e2e 的横向溢出断言误判）。
+@keyframes fxShake {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  10% {
+    transform: translate3d(-8px, 3px, 0) rotate(-1.15deg);
+  }
+  22% {
+    transform: translate3d(8px, -4px, 0) rotate(1.2deg);
+  }
+  34% {
+    transform: translate3d(-7px, 2px, 0) rotate(-1deg);
+  }
+  46% {
+    transform: translate3d(6px, -2px, 0) rotate(0.8deg);
+  }
+  58% {
+    transform: translate3d(-5px, 1px, 0) rotate(-0.6deg);
+  }
+  72% {
+    transform: translate3d(3px, -1px, 0) rotate(0.35deg);
+  }
+  86% {
+    transform: translate3d(-2px, 0, 0) rotate(-0.18deg);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+}
+
+// ---- 手指飞入：屏外 → 戳中（26%）→ 回弹 → 缩回屏外 ----
+@keyframes fxFingerIn {
+  0% {
+    opacity: 0;
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-off-x, -70vw)), -50%)
+      rotate(var(--fx-rot0, 18deg)) scale(0.9);
+  }
+  14% {
+    opacity: 1;
+  }
+  26% {
+    opacity: 1;
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-push, 10px)), -50%)
+      rotate(var(--fx-rot1, 3deg)) scale(1.02);
+  }
+  31% {
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-push, 10px)), -50%)
+      rotate(var(--fx-rot2, 2deg)) scale(1.16, 0.94);
+  }
+  38% {
+    transform: translate(var(--fx-end-x, -96%), -50%) rotate(var(--fx-rot1, 3deg)) scale(1);
+  }
+  54% {
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-push, 10px)), -50%)
+      rotate(var(--fx-rot1, 3deg)) scale(1.04);
+  }
+  62% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 0;
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-off-x, -70vw)), -50%)
+      rotate(var(--fx-rot0, 18deg)) scale(0.92);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(var(--fx-end-x, -96%) + var(--fx-off-x, -70vw)), -50%)
+      rotate(var(--fx-rot0, 18deg)) scale(0.92);
+  }
+}
+
+// ---- 冲击波纹：从命中点扩散两圈 ----
+@keyframes fxFingerRing {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.16);
+  }
+  12% {
+    opacity: 0.95;
+  }
+  55% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(2.5);
+  }
+}
+
+// ---- 番茄抛物线：屏外下方 → 抛物线顶点（34%）→ 命中（45%）→ 压扁摊开 → 化进酱渍 ----
+@keyframes fxTomatoFly {
+  0% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--fx-from-x, -58vw)), calc(-50% + var(--fx-from-y, 42vh)))
+      rotate(0deg) scale(0.55);
+  }
+  9% {
+    opacity: 1;
+  }
+  34% {
+    opacity: 1;
+    transform: translate(calc(-50% + var(--fx-from-mid-x, -12vw)), calc(-50% - 5vh))
+      rotate(var(--rot-a, 260deg)) scale(0.98);
+  }
+  45% {
+    opacity: 1;
+    transform: translate(-50%, -50%) rotate(var(--rot-hit, 420deg)) scale(1.16, 0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: translate(-50%, calc(-50% + 8px)) rotate(var(--rot-hit, 420deg)) scale(1.5, 0.44);
+  }
+  58% {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 12px)) rotate(var(--rot-hit, 420deg)) scale(1.72, 0.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 12px)) rotate(var(--rot-hit, 420deg)) scale(1.72, 0.3);
+  }
+}
+
+// ---- 果汁粒子：先向外上方抛起（--pu），再落（--py）----
+@keyframes fxTomatoBurst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(0, 0) scale(0.25);
+  }
+  9% {
+    opacity: 1;
+  }
+  46% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate(var(--px, 0px), var(--pu, -30px)) scale(1.06)
+      rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(var(--px, 0px), var(--py, 42px)) scale(0.7)
+      rotate(var(--pr, 200deg));
+  }
+}
+
+// ---- 酱渍：命中瞬间摊开，停留到结尾淡出 ----
+@keyframes fxTomatoStain {
+  0%,
+  43% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.22) rotate(0deg);
+  }
+  50% {
+    opacity: 0.95;
+    transform: translate(-50%, -50%) scale(1.1) rotate(7deg);
+  }
+  58% {
+    opacity: 0.9;
+    transform: translate(-50%, -50%) scale(1) rotate(-3deg);
+  }
+  88% {
+    opacity: 0.88;
+    transform: translate(-50%, -50%) scale(1.01) rotate(1deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(1.03) rotate(0deg);
+  }
+}
+
+// ---- 咖啡杯：从上方落下 → 倾倒（34%~76%）→ 收杯飞走 ----
+@keyframes fxCoffeeCupTilt {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -44vh) rotate(16deg);
+  }
+  14% {
+    opacity: 1;
+    transform: translate(-50%, -6vh) rotate(10deg);
+  }
+  24% {
+    opacity: 1;
+    transform: translate(-50%, 0) rotate(14deg);
+  }
+  34% {
+    transform: translate(-50%, 6px) rotate(104deg);
+  }
+  40% {
+    transform: translate(-50%, 2px) rotate(100deg);
+  }
+  76% {
+    transform: translate(-50%, 4px) rotate(102deg);
+  }
+  84% {
+    transform: translate(-50%, 0) rotate(12deg);
+  }
+  94% {
+    opacity: 0.9;
+    transform: translate(-50%, -22vh) rotate(-14deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -46vh) rotate(-22deg);
+  }
+}
+
+// ---- 咖啡液柱：从杯口长出来（粗细脉动，像真在流），落地后收束 ----
+@keyframes fxCoffeeStream {
+  0%,
+  26% {
+    opacity: 0;
+    transform: scaleY(0) scaleX(1.4);
+  }
+  30% {
+    opacity: 0.95;
+    transform: scaleY(0.08) scaleX(1.5);
+  }
+  38% {
+    opacity: 1;
+    transform: scaleY(0.4) scaleX(0.8);
+  }
+  46% {
+    opacity: 1;
+    transform: scaleY(0.76) scaleX(1.12);
+  }
+  54% {
+    opacity: 1;
+    transform: scaleY(0.94) scaleX(0.92);
+  }
+  62% {
+    opacity: 1;
+    transform: scaleY(1) scaleX(1.02);
+  }
+  70% {
+    opacity: 1;
+    transform: scaleY(1) scaleX(0.97);
+  }
+  78% {
+    opacity: 0.9;
+    transform: scaleY(1) scaleX(1);
+  }
+  84% {
+    opacity: 0;
+    transform: scaleY(1) scaleX(0.5);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleY(0.9) scaleX(0.45);
+  }
+}
+
+// ---- 咖啡水滩：落地摊开 + 轻微回弹，最后淡出 ----
+@keyframes fxCoffeePool {
+  0%,
+  56% {
+    opacity: 0;
+    transform: translate(-50%, 10px) scale(0.1, 0.24);
+  }
+  64% {
+    opacity: 0.95;
+    transform: translate(-50%, 0) scale(1.08, 1.14);
+  }
+  74% {
+    opacity: 0.92;
+    transform: translate(-50%, 0) scale(1, 1);
+  }
+  88% {
+    opacity: 0.88;
+    transform: translate(-50%, 0) scale(1.02, 1.01);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(1.05, 1.02);
+  }
+}
+
+// ---- 咖啡飞溅液滴：先上抛再砸回水滩 ----
+@keyframes fxDropFall {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(0, 0) scale(0.5);
+  }
+  12% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translate(var(--px, 0px), -16vh) scale(1.08);
+  }
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) translate(var(--px, 0px), var(--py, 8vh)) scale(0.86, 1.16);
+  }
+}
+
+// ---- 全屏闪光（番茄红 / 咖啡暖棕共用；--fx-flash-dur / --fx-hit 由 JS 给）----
+@keyframes fxFlash {
+  0% {
+    opacity: 0;
+  }
+  7% {
+    opacity: 0.9;
+  }
+  24% {
+    opacity: 0.42;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+// ---- 互动按钮发送反馈（client-core）：按钮轻弹 ----
+@keyframes interactBtnSend {
+  0% {
+    transform: scale(1);
+  }
+  22% {
+    transform: scale(0.9);
+  }
+  52% {
+    transform: scale(1.08);
+  }
+  76% {
+    transform: scale(0.98);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+// ---- 互动按钮发送反馈（client-core）：emoji 上飘淡出 ----
+// 用法：把本动画挂到按钮内绝对定位的 emoji 元素上（建议 left:50%; translateX(-50%) 居中）
+@keyframes interactEmojiFloat {
+  0% {
+    opacity: 0;
+    transform: translateY(0) scale(0.6);
+  }
+  18% {
+    opacity: 1;
+    transform: translateY(-10px) scale(1.12);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-52px) scale(1);
+  }
+}
+
+// ---- 互动按钮冷却（可选）：按钮呼吸式变淡 ----
+@keyframes interactBtnCool {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+  100% {
+    opacity: 1;
+  }
+}

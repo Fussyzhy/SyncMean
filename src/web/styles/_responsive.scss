@@ -63,4 +63,34 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+
+  // v3.6 互动特效：摇屏、飞行、闪屏一律收敛，只留静态印记（元素到时长后由 JS 移除）。
+  body.is-fx-shake .app {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  #interact-fx .fx-finger,
+  #interact-fx .fx-tomato,
+  #interact-fx .fx-cup,
+  #interact-fx .fx-stream,
+  #interact-fx .fx-ring,
+  #interact-fx .fx-hit-core,
+  #interact-fx .fx-bit,
+  #interact-fx .fx-drop,
+  #interact-fx .fx-flash {
+    display: none !important;
+  }
+
+  #interact-fx .fx-stain {
+    animation: none !important;
+    opacity: 0.85;
+    transform: translate(-50%, -50%) scale(1) rotate(0deg);
+  }
+
+  #interact-fx .fx-pool {
+    animation: none !important;
+    opacity: 0.85;
+    transform: translate(-50%, 0) scale(1);
+  }
 }

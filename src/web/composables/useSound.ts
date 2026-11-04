@@ -6,6 +6,7 @@
  */
 
 import { ref } from 'vue';
+import type { InteractKind } from '@shared/protocol';
 import { loadSound, saveSound } from '@/lib/storage';
 
 let audioCtx: AudioContext | null = null;
@@ -74,6 +75,8 @@ export interface SoundApi {
   reveal(): void;
   submit(): void;
   win(): void;
+  /** v3.6 玩家互动：三种互动各一条短提示音（接收方播放） */
+  interact(kind: InteractKind): void;
 }
 
 export function useSound(): SoundApi {
@@ -115,5 +118,29 @@ export function useSound(): SoundApi {
     [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.22, 'triangle', 0.05, i * 0.11));
   }
 
-  return { soundOn, init, toggle, unlock, tick, go, reveal, submit, win };
+  /**
+   * v3.6 玩家互动音：三条音色互不相同，听感上分别对应「戳 / 砸 / 倒」。
+   * tone() 内部已吞掉异常，这里再包一层，确保互动事件永远不会因为音效抛错。
+   */
+  function interact(kind: InteractKind): void {
+    try {
+      if (kind === 'poke') {
+        // 短促上扬的「戳」：高频快击一下
+        tone(1240, 0.05, 'square', 0.028);
+        tone(820, 0.07, 'sine', 0.026, 0.05);
+      } else if (kind === 'tomato') {
+        // 低沉的「啪」：锯齿波下坠
+        tone(210, 0.09, 'sawtooth', 0.032);
+        tone(132, 0.13, 'triangle', 0.03, 0.07);
+      } else {
+        // 温润的「倒水」：两声小波浪
+        tone(520, 0.12, 'sine', 0.03);
+        tone(680, 0.14, 'sine', 0.028, 0.1);
+      }
+    } catch {
+      /* 音效失败无所谓 */
+    }
+  }
+
+  return { soundOn, init, toggle, unlock, tick, go, reveal, submit, win, interact };
 }

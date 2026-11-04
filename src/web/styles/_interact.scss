@@ -1,0 +1,439 @@
+// =============================================================================
+// v3.6 玩家互动特效层（#interact-fx）
+//
+// 三种全屏演出：
+//   1) 戳一戳：手指飞入 + 命中摇屏（fxShake 作用在 .app 上）+ 冲击波纹；
+//   2) 扔番茄：抛物线番茄 + 果汁粒子 + 不规则酱渍 + 全屏红闪；
+//   3) 倒咖啡：杯子倾倒 + 棕色液柱 + 底部水滩 + 飞溅液滴 + 暖棕闪。
+//
+// 约定：
+//   - 根容器 fixed inset 0 / pointer-events:none / z-index 96（撒花 95 之上、toast 100 之下），
+//     overflow:hidden 保证 375px 下不产生横向滚动；
+//   - 每条特效一个 .fx-item.fx-item--<kind>，位置/方向/粒子参数全部来自内联 CSS 变量
+//     （见 composables/useInteractionFx.ts），本文件只负责选择器与声明；
+//   - 全部 @keyframes 在 _animations.scss（本文件不含任何 keyframes）；
+//   - 尺寸优先 clamp()/vw/vh，位置用百分比，窄屏不溢出；
+//   - 强调光走主题令牌（--cyan / --glow-cyan），番茄红 / 咖啡棕是主题无关的实体色，
+//     两套主题下都保持饱和度，并用描边 + 阴影保证边界清晰。
+// =============================================================================
+
+@use 'variables' as *;
+
+// ---- 根容器：永不拦截点击 ----
+#interact-fx {
+  position: fixed;
+  inset: 0;
+  z-index: 96;
+  pointer-events: none;
+  overflow: hidden;
+  contain: layout paint;
+}
+
+// ---- 单条特效的舞台（铺满，子元素靠内联 CSS 变量定位）----
+.fx-item {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+// =============================================================================
+// 1) 戳一戳（1100ms）
+// =============================================================================
+
+// 摇屏：作用于 .app，而不是 transform body。
+// body 上有 fixed 的网格遮罩与各种浮层，变换 body 会让这些 fixed 元素的定位基准跳变。
+body.is-fx-shake .app {
+  animation: fxShake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+  will-change: transform;
+}
+
+.fx-finger {
+  position: absolute;
+  left: var(--fx-x, 50%);
+  top: var(--fx-y, 34%);
+  width: clamp(148px, 44vw, 206px);
+  aspect-ratio: 210 / 120;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 16px 22px rgba(4, 14, 24, 0.38));
+  animation: fxFingerIn var(--fx-dur, 1100ms) cubic-bezier(0.22, 0.9, 0.28, 1) both;
+  will-change: transform, opacity;
+}
+
+.fx-finger__art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  // 从右侧伸入时镜像手部，指尖仍然对准动画锚点
+  transform: scaleX(var(--fx-mirror, 1));
+}
+
+// 冲击波纹：两圈错开 90ms 的白/青冲击波
+.fx-ring {
+  position: absolute;
+  left: var(--fx-x, 50%);
+  top: var(--fx-y, 34%);
+  width: clamp(84px, 24vw, 128px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2.5px solid var(--cyan);
+  box-shadow:
+    0 0 22px var(--glow-cyan),
+    inset 0 0 18px rgba(255, 255, 255, 0.45);
+  opacity: 0;
+  animation: fxFingerRing 0.62s cubic-bezier(0.16, 0.9, 0.3, 1) var(--fx-hit, 330ms) both;
+
+  &--late {
+    width: clamp(58px, 17vw, 92px);
+    border-width: 2px;
+    animation-delay: calc(var(--fx-hit, 330ms) + 90ms);
+  }
+}
+
+// 命中核心的白色高光爆点
+.fx-hit-core {
+  position: absolute;
+  left: var(--fx-x, 50%);
+  top: var(--fx-y, 34%);
+  width: clamp(54px, 16vw, 78px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff 0%, var(--cyan) 38%, transparent 72%);
+  transform: translate(-50%, -50%);
+  filter: blur(0.5px);
+  opacity: 0;
+  animation: fxFlash 0.42s ease-out var(--fx-hit, 330ms) both;
+}
+
+// =============================================================================
+// 2) 扔番茄（1600ms）
+// =============================================================================
+
+.fx-tomato {
+  position: absolute;
+  left: var(--tx, 50%);
+  top: var(--ty, 40%);
+  width: clamp(44px, 12.5vw, 60px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 34% 26%,
+    #ffb08c 0%,
+    #ff8a63 18%,
+    #ff6b4a 44%,
+    #e23b3b 74%,
+    #a82020 100%
+  );
+  box-shadow:
+    inset -5px -7px 14px rgba(120, 16, 16, 0.42),
+    inset 4px 5px 12px rgba(255, 190, 160, 0.35),
+    0 12px 26px rgba(0, 0, 0, 0.3);
+  animation: fxTomatoFly var(--fx-dur, 1600ms) cubic-bezier(0.3, 0.05, 0.2, 1) both;
+  will-change: transform, opacity;
+}
+
+// 果皮高光
+.fx-tomato__gloss {
+  position: absolute;
+  left: 15%;
+  top: 13%;
+  width: 36%;
+  height: 27%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0) 70%);
+  opacity: 0.8;
+}
+
+// 绿蒂（星形萼片，用 clip-path 画，随番茄一起翻滚）
+.fx-tomato__leaf {
+  position: absolute;
+  left: 50%;
+  top: -16%;
+  width: 58%;
+  aspect-ratio: 1;
+  transform: translateX(-50%) rotate(-8deg);
+  background: linear-gradient(155deg, #57cb61 0%, #3fae4a 52%, #1f6428 100%);
+  clip-path: polygon(50% 100%, 12% 40%, 0% 4%, 34% 24%, 50% 0%, 66% 24%, 100% 4%, 88% 40%);
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.25));
+}
+
+// 爆汁粒子层：0×0 的定位点，粒子靠 --px/--pu/--py 抛洒
+.fx-burst {
+  position: absolute;
+  left: var(--tx, 50%);
+  top: var(--ty, 40%);
+  width: 0;
+  height: 0;
+}
+
+.fx-bit {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--ps, 8px);
+  height: var(--ps, 8px);
+  border-radius: 50%;
+  background: var(--pc, #ff8a3d);
+  box-shadow: 0 0 8px rgba(226, 59, 59, 0.5);
+  opacity: 0;
+  animation: fxTomatoBurst 0.58s cubic-bezier(0.15, 0.75, 0.3, 1)
+    calc(var(--fx-hit, 720ms) + var(--pd, 0ms)) both;
+
+  // 果汁块形状有圆有方，避免一圈一模一样的圆点
+  &:nth-child(3n) {
+    border-radius: 48% 52% 44% 56% / 62% 58% 42% 38%;
+  }
+
+  &:nth-child(4n) {
+    border-radius: 60% 40% 55% 45% / 48% 62% 38% 52%;
+  }
+}
+
+// 不规则番茄酱渍：多层 blob 叠出不规则轮廓 + 溅开的稀果汁光晕 + 四散小酱点
+.fx-stain {
+  position: absolute;
+  left: var(--tx, 50%);
+  top: var(--ty, 40%);
+  width: clamp(122px, 38vw, 196px);
+  height: clamp(76px, 24vw, 122px);
+  transform: translate(-50%, -50%);
+  border-radius: 46% 54% 61% 39% / 51% 43% 57% 49%;
+  background:
+    radial-gradient(
+      circle at 27% 64%,
+      rgba(178, 34, 26, 0.92) 0%,
+      rgba(178, 34, 26, 0.92) 24%,
+      rgba(178, 34, 26, 0) 33%
+    ),
+    radial-gradient(
+      circle at 76% 32%,
+      rgba(160, 28, 24, 0.9) 0%,
+      rgba(160, 28, 24, 0.9) 20%,
+      rgba(160, 28, 24, 0) 29%
+    ),
+    radial-gradient(
+      circle at 48% 46%,
+      rgba(206, 52, 38, 0.96) 0%,
+      rgba(168, 30, 26, 0.94) 46%,
+      rgba(118, 14, 16, 0.9) 72%,
+      rgba(96, 10, 14, 0) 84%
+    );
+  box-shadow:
+    inset 4px 6px 12px rgba(255, 150, 120, 0.16),
+    inset -10px -12px 24px rgba(56, 4, 6, 0.5),
+    // 外圈再甩出两小滩，打破椭圆轮廓（box-shadow 会复制圆角形状，正好当溅出的酱）
+    16px 12px 0 -6px rgba(168, 30, 26, 0.55),
+    -20px -16px 0 -8px rgba(150, 22, 24, 0.45),
+    30px -20px 0 -10px rgba(178, 34, 26, 0.4);
+  filter: blur(0.4px);
+  animation: fxTomatoStain var(--fx-dur, 1600ms) ease-out both;
+  will-change: transform, opacity;
+
+  // 溅开的稀果汁光晕（偏一侧，让外轮廓不居中才像溅上去的）
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -30% -20% -18% -34%;
+    border-radius: 46% 54% 52% 48% / 55% 45% 55% 45%;
+    background: radial-gradient(circle at 50% 50%, rgba(190, 40, 30, 0.5) 0%, rgba(150, 20, 20, 0) 70%);
+    filter: blur(5px);
+  }
+
+  // 四散的小酱点
+  &::after {
+    content: '';
+    position: absolute;
+    inset: -12%;
+    background:
+      radial-gradient(circle at 94% 40%, rgba(210, 46, 40, 0.85) 0 3px, transparent 4px),
+      radial-gradient(circle at 6% 62%, rgba(210, 46, 40, 0.75) 0 2.5px, transparent 3.5px),
+      radial-gradient(circle at 24% 96%, rgba(210, 46, 40, 0.7) 0 2px, transparent 3px),
+      radial-gradient(circle at 70% 6%, rgba(210, 46, 40, 0.65) 0 2.5px, transparent 3.5px);
+    background-repeat: no-repeat;
+  }
+}
+
+// 全屏闪光（番茄红 / 咖啡暖棕共用一套 fxFlash，只换底色与时长）
+.fx-flash {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  animation: fxFlash var(--fx-flash-dur, 0.52s) ease-out var(--fx-hit, 720ms) both;
+}
+
+.fx-flash--tomato {
+  background:
+    radial-gradient(
+      circle at var(--tx, 50%) var(--ty, 40%),
+      rgba(255, 128, 96, 0.42) 0%,
+      rgba(226, 59, 59, 0.26) 32%,
+      rgba(226, 59, 59, 0) 66%
+    ),
+    rgba(226, 59, 59, 0.1);
+}
+
+// =============================================================================
+// 3) 倒咖啡（2000ms）
+// =============================================================================
+
+.fx-cup {
+  position: absolute;
+  left: var(--fx-x, 50%);
+  top: 5vh;
+  width: clamp(62px, 18vw, 86px);
+  height: clamp(58px, 17vw, 80px);
+  transform-origin: 50% 55%;
+  animation: fxCoffeeCupTilt var(--fx-dur, 2000ms) cubic-bezier(0.3, 0.02, 0.24, 1) both;
+  will-change: transform, opacity;
+}
+
+.fx-cup__body {
+  position: absolute;
+  inset: 0;
+  border-radius: 9% 9% 44% 44% / 7% 7% 40% 40%;
+  background: linear-gradient(96deg, #fbf4ea 0%, #f4ece2 36%, #e2d3bf 72%, #c8b49b 100%);
+  box-shadow:
+    inset 0 0 0 2px #6b4a33,
+    inset -8px -6px 14px rgba(120, 94, 66, 0.35),
+    0 10px 24px rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+// 杯口咖啡液面（杯身倾倒后正好朝向液柱方向）
+.fx-cup__coffee {
+  position: absolute;
+  left: 7%;
+  right: 7%;
+  top: 5%;
+  height: 40%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 38%, #9a6642 0%, #6b432a 52%, #43281a 100%);
+  box-shadow: inset 0 2px 4px rgba(255, 200, 150, 0.35);
+}
+
+.fx-cup__handle {
+  position: absolute;
+  right: -28%;
+  top: 24%;
+  width: 40%;
+  height: 46%;
+  border: clamp(5px, 1.5vw, 7px) solid #8a6242;
+  border-left-color: transparent;
+  border-radius: 50%;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.28));
+}
+
+// 棕色液柱：从杯口流到水滩（上窄下宽 + 圆柱高光，落地时压扁摊开）
+.fx-stream {
+  position: absolute;
+  left: calc(var(--fx-x, 50%) + clamp(24px, 8.2vw, 40px));
+  top: calc(5vh + clamp(38px, 11vw, 54px));
+  bottom: calc(6vh + clamp(24px, 8vw, 40px));
+  width: clamp(11px, 3.2vw, 16px);
+  transform-origin: 50% 0;
+  clip-path: polygon(38% 0%, 62% 0%, 100% 100%, 0% 100%);
+  background: linear-gradient(
+    90deg,
+    #3a2011 0%,
+    #6b432a 18%,
+    #9a6642 44%,
+    #b07a52 56%,
+    #6b432a 82%,
+    #2f190e 100%
+  );
+  filter: drop-shadow(0 0 6px rgba(90, 56, 37, 0.4));
+  animation: fxCoffeeStream var(--fx-dur, 2000ms) ease-in-out both;
+  will-change: transform, opacity;
+
+  // 流动的液面高光
+  &::after {
+    content: '';
+    position: absolute;
+    left: 34%;
+    top: 0;
+    width: 24%;
+    height: 100%;
+    background: linear-gradient(180deg, rgba(255, 214, 160, 0.6), rgba(255, 214, 160, 0.06));
+  }
+}
+
+// 底部水滩：不规则椭圆 + 上缘反光
+.fx-pool {
+  position: absolute;
+  left: calc(var(--fx-x, 50%) + clamp(24px, 8.2vw, 40px));
+  bottom: 6vh;
+  width: clamp(172px, 58vw, 288px);
+  height: clamp(52px, 16vw, 84px);
+  border-radius: 46% 54% 62% 38% / 58% 46% 54% 42%;
+  background: radial-gradient(
+    ellipse at 42% 30%,
+    rgba(186, 128, 86, 0.96) 0%,
+    rgba(122, 76, 47, 0.97) 34%,
+    rgba(74, 44, 28, 0.97) 72%,
+    rgba(48, 28, 17, 0.94) 100%
+  );
+  box-shadow:
+    inset 0 2px 0 rgba(255, 214, 160, 0.3),
+    inset 0 -6px 12px rgba(30, 16, 8, 0.55),
+    0 14px 34px rgba(0, 0, 0, 0.3);
+  animation: fxCoffeePool var(--fx-dur, 2000ms) cubic-bezier(0.2, 0.9, 0.24, 1) both;
+  will-change: transform, opacity;
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 16%;
+    right: 22%;
+    top: 14%;
+    height: 22%;
+    border-radius: 50%;
+    background: radial-gradient(ellipse at 50% 50%, rgba(255, 214, 160, 0.28), transparent 72%);
+  }
+}
+
+// 飞溅液滴层：0×0 定位点（水滩上沿），液滴向外抛起再砸回水面
+.fx-drops {
+  position: absolute;
+  left: calc(var(--fx-x, 50%) + clamp(24px, 8.2vw, 40px));
+  bottom: calc(6vh + clamp(52px, 16vw, 84px));
+  width: 0;
+  height: 0;
+}
+
+.fx-drop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--ps, 8px);
+  aspect-ratio: 0.72;
+  border-radius: 50% 50% 46% 46% / 62% 62% 38% 38%;
+  background:
+    radial-gradient(circle at 34% 26%, rgba(255, 214, 160, 0.55), rgba(255, 214, 160, 0) 55%),
+    linear-gradient(180deg, #a56b45 0%, #5a3825 60%, #3a2011 100%);
+  box-shadow: 0 0 6px rgba(90, 56, 37, 0.5);
+  opacity: 0;
+  animation: fxDropFall 0.62s cubic-bezier(0.4, 0.1, 0.3, 1)
+    calc(var(--fx-hit, 1200ms) + var(--pd, 0ms)) both;
+}
+
+.fx-flash--coffee {
+  background:
+    radial-gradient(
+      circle at 50% 92%,
+      rgba(255, 186, 120, 0.52) 0%,
+      rgba(138, 90, 59, 0.36) 36%,
+      rgba(90, 56, 37, 0) 72%
+    ),
+    rgba(138, 90, 59, 0.16);
+}
+
+// =============================================================================
+// 互动按钮的发送反馈（配合 client-core 的 .interact-btn，见 _game.scss）
+//
+// client-core 已经把按钮本体的轻弹挂在 .interact-btn.is-sending（interactBtnSend），
+// 这里只补 emoji 那半：发送期间 emoji 上飘淡出（keyframe：interactEmojiFloat）。
+// 若 client-core 想把这条收进 _game.scss，直接搬走即可，两边不会打架。
+// =============================================================================
+.interact-btn.is-sending .interact-btn__emoji {
+  animation: interactEmojiFloat 0.5s cubic-bezier(0.22, 0.9, 0.28, 1) both;
+}
