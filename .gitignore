@@ -2,7 +2,10 @@
 node_modules/
 
 # 构建产物（Vite → dist/public，tsc → dist/server）
-dist/
+#
+# 注意：dist/ **故意不忽略**。2C2G 的小服务器跑不动 vite/tsc（这是把整机顶到 OOM 的那一步），
+# 所以用「本地 yarn build → dist 提交进 git → 服务器用 Dockerfile.prebuilt 只 COPY」的部署方式（README §8）。
+# 每次 `yarn build` 后 git status 会看到 dist 变化，属于预期；提交前记得先 yarn build。
 .vite/
 
 # 测试与验收产物

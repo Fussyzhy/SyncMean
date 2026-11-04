@@ -1,0 +1,66 @@
+# 同声传意 · 「预构建产物」运行镜像（docker-compose.yml 默认用它）
+#
+# 日常部署（2C2G 小机器）：
+#   本地：yarn build → git add -A && git commit -m "build: 更新 dist" && git push
+#   服务器：git pull && docker compose up -d --build
+# 详见 README §8。
+#
+# 和 Dockerfile 的区别：**没有 builder 阶段**——不跑 `yarn install`（含 devDependencies）、
+# 不跑 `vite build`、不跑 `tsc`，直接把仓库里已经提交的 `dist/` 拷进镜像。
+#
+# 为什么需要它：2C2G 小机器上，vite/tsc 那一步峰值约 420MB、全量装依赖约 535MB，
+# 叠加 dockerd 就会把整机顶到 OOM。这个 Dockerfile 在服务器上只做两件事：
+#   1. 装 78 个生产依赖（express + socket.io，实测峰值 ~171MB、node_modules ~12MB）
+#   2. COPY 仓库里的 dist/（Vite 产物 + tsc 产物）
+#
+# 前提（重要）：dist/ 必须提交进 git，并且**改完 src 要 `yarn build` 后一起提交**，
+# 否则镜像里跑的是旧代码。从源码完整构建（CI / 内存充裕的机器）用 Dockerfile。
+
+# ==================== 生产依赖 ====================
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+
+ARG YARN_REGISTRY=https://registry.npmmirror.com
+ARG YARN_NETWORK_TIMEOUT=300000
+
+# 只装生产依赖也卡住堆上限（小机器保命，和 Dockerfile 保持一致的默认值）
+ARG NODE_BUILD_HEAP=768
+ENV NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP}"
+
+COPY package.json yarn.lock ./
+
+# 让 lockfile 里的 resolved 域名跟随 YARN_REGISTRY（Yarn 1 只认 resolved）
+RUN if [ "$YARN_REGISTRY" != "https://registry.npmmirror.com" ]; then \
+      sed -i "s|https://registry.npmmirror.com|$YARN_REGISTRY|g" yarn.lock; \
+    fi
+
+# 只要 express / socket.io 及其传递依赖（express、socket.io 都是纯 JS，--ignore-scripts 安全）
+RUN yarn install --frozen-lockfile --production --ignore-scripts --non-interactive \
+      --network-timeout "$YARN_NETWORK_TIMEOUT"
+
+# ==================== 运行阶段 ====================
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    PORT=3210
+
+# 运行期堆上限（MB），和 Dockerfile 一致：小机器上让 Node 自己退出，别让内核 OOM 杀 sshd
+ARG NODE_RUNTIME_HEAP=384
+ENV NODE_OPTIONS="--max-old-space-size=${NODE_RUNTIME_HEAP}"
+
+COPY package.json ./
+COPY --from=deps /app/node_modules ./node_modules
+# 关键：dist 来自 git（本地预构建），不是本镜像里构建的
+COPY --chown=node:node dist ./dist
+
+USER node
+
+EXPOSE 3210
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3210)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/server/index.js"]

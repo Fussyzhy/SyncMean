@@ -1,4 +1,8 @@
-# 同声传意 · 生产镜像（多阶段）
+# 同声传意 · 生产镜像（多阶段，从源码完整构建）
+#
+# 用途：CI（.github/workflows/docker.yml）、内存充裕的构建机、或不想把 dist/ 放进 git 的场景。
+#      2C2G 小机器的日常部署不走这个文件——docker-compose.yml 默认用 Dockerfile.prebuilt
+#      （dist/ 入库，服务器上不跑 vite/tsc），见 README §8。
 #
 #   builder：一次联网装全量依赖 → Vite 构建前端(dist/public) + tsc 编译后端(dist/server)
 #            再离线装一份「只有生产依赖」的 node_modules
@@ -23,6 +27,23 @@ WORKDIR /app
 ARG YARN_REGISTRY=https://registry.npmmirror.com
 # 弱网时单包下载超时（毫秒）。默认 30s 容易在慢链路上反复重试，看起来像卡死。
 ARG YARN_NETWORK_TIMEOUT=300000
+
+# 构建期单个 node 进程的 V8 堆上限（MB）——2C2G 小机器的保命闸门。
+#
+# Node 的默认堆上限是按「物理内存」估的（2G 机器上单个 node 进程的堆上限约 1G），
+# 而 docker build 的构建容器默认没有内存限制，`yarn install` / `vite build` / `tsc`
+# 谁都不会主动收手。于是 2C2G 机器上常见的结果是：构建进行到 `yarn build` 时内存顶满，
+# 内核 OOM killer 连 sshd / dockerd 一起杀 → SSH 掉线、面板失联，看起来就是「服务器崩了」。
+#
+# 卡住这个上限后，最坏结果是这一步在容器里打印
+#   FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory
+# 属于「构建失败、服务器没事」，可以调大重试；而不会把宿主机打死。
+#
+# 实测（本仓库同一份 yarn.lock）：冷装全部依赖峰值 ~535MB，vite build + tsc 峰值 ~420MB，
+# 768MB 够用并留了余量。构建机内存充裕时可以放开：
+#   docker build --build-arg NODE_BUILD_HEAP=2048 -t syncmean:latest .
+ARG NODE_BUILD_HEAP=768
+ENV NODE_OPTIONS="--max-old-space-size=${NODE_BUILD_HEAP}"
 
 # 依赖清单先落地，最大化利用层缓存
 COPY package.json yarn.lock ./
@@ -55,6 +76,13 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
     PORT=3210
+
+# 运行期堆上限（MB）：小内存机器上，宁可让 Node 自己 OOM 退出、由 restart: unless-stopped
+# 重新拉起（房间本来就在内存里、重启即清空），也不要让内核 OOM 去杀 SSH / dockerd。
+# 正常双人对局的房间数据只有几十 KB，384MB 富余很大。
+# 想放宽：compose 里加 `NODE_OPTIONS: --max-old-space-size=768`，或 docker run -e NODE_OPTIONS=...
+ARG NODE_RUNTIME_HEAP=384
+ENV NODE_OPTIONS="--max-old-space-size=${NODE_RUNTIME_HEAP}"
 
 # package.json 必须带上：里面有 "type": "module"，dist/server 是 ESM
 COPY package.json ./

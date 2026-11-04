@@ -1,0 +1,81 @@
+name: build-image
+
+# 可选方案：在 GitHub 的机器上从源码完整构建镜像并推到镜像仓库。
+# 日常 2C2G 部署**不需要**它（默认是 dist 入库 + Dockerfile.prebuilt，见 README §8）；
+# 适用于「不想让 git 里带 dist 产物 / 想用镜像仓库分发」的情况。
+# 这里显式用 Dockerfile（从源码构建），不依赖仓库里的 dist/，所以不会有产物过期的风险。
+#
+# 产物：ghcr.io/fussyzhy/syncmean
+#   - 推 main            → :latest + :sha-xxxxxxx
+#   - 推 tag（如 v1.2.0）→ :v1.2.0 + :sha-xxxxxxx
+#   - 手动 Actions → Run workflow 也可以触发
+#
+# 服务器上（README §8 可选 1）：
+#   .env: SYNCMEAN_IMAGE=ghcr.io/fussyzhy/syncmean:latest
+#   bash deploy/deploy-pull.sh
+#
+# 注意：
+#   1. GHCR 的包默认是 private，服务器拉之前要么把包设为 public
+#      （GitHub → 仓库 → Packages → 对应包 → Package settings → Change visibility），
+#      要么在服务器上 `docker login ghcr.io -u 用户名 -p <带 read:packages 的 PAT>`。
+#   2. 国内服务器拉 ghcr.io 可能很慢/不稳；可以改用阿里云 ACR：
+#      把下面 IMAGE 换成 registry.cn-xxx.aliyuncs.com/命名空间/syncmean，
+#      加一个 aliyun/docker-login-action 步骤（或者把 IMAGE 写成 secrets 变量），
+#      然后在服务器 docker login 对应 registry。
+#   3. 仓库改名/换 owner 时记得同步改 IMAGE。
+
+# 注意：YAML 1.1 里裸写 `on:` 会被某些解析器当成布尔值 true（GitHub 自己没问题，
+# 这里加引号纯粹是为了各种 lint/解析器都能过）。
+"on":
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/fussyzhy/syncmean
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: 拉代码
+        uses: actions/checkout@v4
+
+      - name: 准备 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算 tag
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NODE_BUILD_HEAP=2048
+            YARN_REGISTRY=https://registry.npmmirror.com
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

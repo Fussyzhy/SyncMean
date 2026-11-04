@@ -2,11 +2,17 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
+      # 默认用「预构建产物」镜像：不跑 vite/tsc，只装生产依赖 + COPY 仓库里的 dist/。
+      # 这是给 2 核 2G 小机器准备的（构建峰值 ~500MB，含 dockerd），见 README §8。
+      # 前提：dist/ 已随代码提交（本仓库已提交）。想从源码完整构建 → 用 Dockerfile（CI / 大内存机器），
+      # 见 README §8「从源码构建」。
+      dockerfile: Dockerfile.prebuilt
       args:
         # 默认与 yarn.lock 里 resolved 的源一致（npmmirror）；
         # 构建机访问官方源更快时改成 https://registry.npmjs.org
         YARN_REGISTRY: https://registry.npmmirror.com
+        # 生产依赖安装时的堆上限（MB）。2C2G 保持 768，构建机内存大可以调高。
+        NODE_BUILD_HEAP: ${NODE_BUILD_HEAP:-768}
     image: syncmean:latest
     container_name: syncmean
     restart: unless-stopped
@@ -26,6 +32,16 @@ services:
       TURN_URL: ${TURN_URL:-}
       TURN_USERNAME: ${TURN_USERNAME:-}
       TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
+      # 运行期堆上限，镜像里默认 384MB（够用）。要放宽就取消注释：
+      # NODE_OPTIONS: "--max-old-space-size=768"
+    # 单容器内存硬上限 + 日志轮转：2G 小机器上防止一个容器把整机吃光、日志写满磁盘。
+    # 应用本身常驻只有几十 MB，512m 足够；真被 OOM kill 了 compose 会自动重启。
+    mem_limit: ${APP_MEM_LIMIT:-512m}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test:
         - CMD
@@ -38,3 +54,8 @@ services:
       start_period: 5s
 # 注意：房间数据全部在内存里，只能跑 1 个实例。
 # container_name 固定成单容器，请**不要**去掉它去 up --scale（会让同一房间的两人落到不同进程）。
+#
+# 部署流程（2C2G 默认，见 README §8）：
+#   本地：yarn build → git add -A && git commit -m "build: 更新 dist" && git push
+#   服务器：git pull && docker compose up -d --build
+# 服务器上不跑 vite/tsc，构建内存 ~500MB（含 dockerd），2G 机器不会再被顶穿。

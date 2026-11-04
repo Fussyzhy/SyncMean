@@ -149,9 +149,18 @@ yarn verify:admin  # 管理后台真浏览器验收：需先 yarn build && yarn 
 
 ## 用 Docker 部署（推荐）
 
-镜像定义见 `Dockerfile`（多阶段：builder 用 `yarn build` 产出 `dist/`，runtime 只装生产依赖、非 root 运行、内置 `/health` 探活）。
+镜像有两个 Dockerfile，别搞混：
+
+- `Dockerfile.prebuilt`（**`docker-compose.yml` 默认用的就是它**）：不跑 `yarn install`（devDependencies）、不跑 `vite build`/`tsc`，只装生产依赖（express + socket.io）+ 把仓库里已提交的 `dist/` 拷贝进镜像。2C2G 小机器靠它，构建峰值约 500MB（含 dockerd）；
+- `Dockerfile`：从源码完整构建（builder 阶段 `yarn install` + `yarn build`），给 CI / 内存充裕的构建机用。
+
+两者都是非 root 运行、内置 `/health` 探活，并卡了 V8 堆上限（`NODE_BUILD_HEAP` / `NODE_RUNTIME_HEAP`）。
+
+> **2 核 2G 日常部署不用看本节**，直接看 §8：本地 `yarn build` + 提交，服务器 `git pull` + `docker compose up -d --build` 就完事。
 
 ### 1. 构建并启动
+
+下面这条是「从源码完整构建」（`Dockerfile`），构建机内存要够；**2C2G 服务器不要跑**（见 §8）。
 
 ```bash
 docker build -t syncmean:latest .
@@ -180,6 +189,10 @@ docker compose up -d --build   # 构建并后台启动
 docker compose logs -f         # 看日志
 docker compose down            # 停止并移除
 ```
+
+> 2 核 2G 机器可以直接跑这条命令：`docker-compose.yml` 默认用 `Dockerfile.prebuilt`，服务器上不跑 vite/tsc，
+> 只装生产依赖 + 拷 `dist/`，构建峰值约 500MB（含 dockerd）。**前提是 `dist/` 已随代码提交**（本仓库已提交）。
+> 改动代码后的完整流程（本地 `yarn build` → 提交 → 服务器 `git pull` + `docker compose up -d --build`）见 §8。
 
 > 管理后台密钥：`docker-compose.yml` 已把 `ADMIN_KEY` 透传给容器（`ADMIN_KEY: ${ADMIN_KEY:-}`）。
 > Docker Compose 会自动读取项目根目录的 `.env` 做变量替换，所以在 `.env` 里填 `ADMIN_KEY=...` 再 `docker compose up -d` 即可；
@@ -222,12 +235,23 @@ game.example.com {
 
 ### 5. 更新版本
 
+默认方式（2C2G，dist 入库）：
+
 ```bash
-git pull
-docker compose up -d --build   # 或重新 docker build + docker rm -f 旧容器
+# 本地：改完代码
+yarn build
+git add -A && git commit -m "build: 更新 dist" && git push
+
+# 服务器
+git pull && docker compose up -d --build
 ```
 
+> 想改成「CI 构建镜像 + 服务器只 pull」或「从源码完整构建」：见 §8 的可选方案。
+
 ### 6. 构建卡在 `yarn install` / 换下载源
+
+> 本节只适用于**从源码完整构建**（`Dockerfile`，CI / 大内存机器）。默认的 2C2G 部署走 `Dockerfile.prebuilt`，
+> 服务器上只装生产依赖、不跑 `yarn build`，基本不会碰到这里的问题。
 
 **先分清「慢」和「卡死」**：日志里出现 `There appears to be trouble with your network connection. Retrying...` 时，如果它还能继续往前走（`[4/5] Linking dependencies...`、`[5/5] Building fresh packages...`），那就只是网速慢——Yarn 会对每个包超时重试，273 个包在低带宽下走几分钟很正常，等着就行，**不用中断重建**（中断反而重来）。实测一次 459s 的慢构建里，旧 Dockerfile 的 `[builder 5/8]` 与 `[runtime 5/6]` 两条 `yarn install` 是**并行**各拉一遍依赖，互相抢带宽，各自 440s 左右。真正卡死（超过 10 分钟毫无推进）才按下面排查。
 
@@ -270,6 +294,81 @@ PORT=8080 ADMIN_KEY='你的管理后台密钥' yarn start
 ```
 
 （也可以把 `PORT` / `ADMIN_KEY` 写进项目根目录 `.env`，服务启动时会自动读取；进程环境变量优先级更高。）
+
+### 8. 2 核 2G 服务器部署（默认：dist 入库 + 预构建镜像）
+
+**为什么这么设计**：`docker compose up -d --build` 的构建默认跑在服务器上。2C2G 上跑「全量装依赖 + `vite build` + `tsc`」会把整机顶到 OOM——实测全量 install 峰值 ~535MB、`vite build`+`tsc` 峰值 ~420MB，再叠加 dockerd/containerd（~200–300MB）；没有 swap 时内核 OOM killer 会连 sshd/dockerd 一起杀，表现就是「内存占满 → 服务器崩了、SSH 连不上」，而且大概率就卡在 `yarn build` 那一步。
+
+所以本仓库默认把构建挪到**你自己的电脑**上：构建产物 `dist/`（约 420KB）提交进 git；服务器上的镜像（`Dockerfile.prebuilt`）不跑 vite/tsc，只装 78 个生产依赖（实测峰值 ~171MB、`node_modules` 约 12MB）+ 拷贝 `dist/`。
+
+#### 日常流程（就两条命令）
+
+```bash
+# 本地：改完代码后
+yarn build
+git add -A && git commit -m "build: 更新 dist" && git push
+
+# 服务器
+git pull
+docker compose up -d --build
+```
+
+内存对比：
+
+| 步骤 | 以前（服务器全量构建） | 现在（默认） |
+| --- | --- | --- |
+| 装依赖 | 273 包，峰值 ~535MB | 只装 78 个生产依赖，峰值 ~171MB（依赖没变时直接命中缓存，不执行） |
+| `vite build` + `tsc` | 峰值 ~420MB | **不执行**（用 git 里的 `dist/`） |
+| 含 dockerd 的整机峰值 | ~1GB 以上，2G 机器会 OOM | ~500MB，2G 机器安全 |
+
+> 表中「实测」是本机（Node 22 + 同一份 `yarn.lock`）冷启动时的峰值，Alpine 容器内是同一量级。
+
+#### 三条注意
+
+1. **改了 src 忘了 `yarn build` 就提交，服务器上跑的就是旧代码。** 提交前确认 `git status` 里 `dist/` 和源码是一起变的。
+2. `dist/` 已从 `.gitignore` 移除、`.dockerignore` 里也不再排除它——`yarn build` 后看到 `dist/` 变化是预期行为。
+3. 依赖（`yarn.lock` / `package.json`）没变时，镜像的依赖层直接命中缓存；日常更新只重新 COPY 一层 `dist/`，几秒完成、几乎不占内存。
+
+#### 可选 1：从源码完整构建 / 镜像仓库（CI、内存充裕的机器）
+
+`Dockerfile` 仍是「从源码构建」的版本，默认部署不用它：
+
+```bash
+docker build -t syncmean:latest .    # 注意是 Dockerfile：全量 yarn install + yarn build，别在 2C2G 上跑
+```
+
+推到镜像仓库、服务器只拉镜像（对应 `docker-compose.prod.yml`）：
+
+```bash
+# 构建机 / CI
+IMAGE=ghcr.io/fussyzhy/syncmean:latest bash deploy/build-push.sh
+
+# 服务器：.env 里写 SYNCMEAN_IMAGE=ghcr.io/fussyzhy/syncmean:latest
+bash deploy/deploy-pull.sh
+```
+
+`.github/workflows/docker.yml` 会在推 `main` 时自动做这件事（GHCR 默认私有、国内拉取不稳可改阿里云 ACR，见文件头注释）。这条路不需要把 `dist/` 放进 git，适合以后不想让仓库带产物的时候——代价是多维护一个镜像仓库。
+
+#### 可选 2：给服务器加 swap
+
+不是日常部署的必需步骤（默认构建峰值 ~500MB），但内存抖动时更不容易失联：
+
+```bash
+sudo bash deploy/enable-swap.sh      # 2G swapfile + 写 /etc/fstab + vm.swappiness=10
+```
+
+#### 构建期 / 运行期的内存闸门
+
+- `Dockerfile.prebuilt` 和 `Dockerfile` 都卡了 `NODE_BUILD_HEAP=768`：真顶不住时是容器内报 `JavaScript heap out of memory`（构建失败、机器没事），可以调大重试，不会把宿主机打死；
+- 运行期 `NODE_RUNTIME_HEAP=384` + compose 的 `mem_limit: 512m` + 日志轮转（`max-size: 10m`），防容器 / 日志吃满小机器；
+- 如果已经在服务器上被 OOM 过，先确认是谁吃的内存：
+
+```bash
+free -m                                                        # 可用内存 / 有没有 swap
+dmesg -T | grep -iE 'out of memory|oom-kill|killed process'    # 有没有 OOM 记录
+docker stats --no-stream                                       # 每个容器占多少
+docker compose build --progress=plain 2>&1 | tee build.log      # 看卡在哪一层
+```
 
 ## 可扩展方向
 
