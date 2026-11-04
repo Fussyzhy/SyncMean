@@ -38,6 +38,40 @@ export const INTERACT_KINDS = ['poke', 'tomato', 'coffee'] as const;
 
 export type InteractKind = (typeof INTERACT_KINDS)[number];
 
+/* ==================== v3.7：语音连麦（P2P，服务器只转发信令） ==================== */
+
+/**
+ * 信令类型白名单。服务器**不解析 data 内容**、不落盘、不参与媒体转发：
+ * - `offer` / `answer`：SDP 文本（`RTCPeerConnection.localDescription.sdp`）；
+ * - `ice`：单条 ICE candidate 的 JSON 字符串（`JSON.stringify(candidate)`，空候选用 `''`）。
+ */
+export const VOICE_SIGNAL_KINDS = ['offer', 'answer', 'ice'] as const;
+
+export type VoiceSignalKind = (typeof VOICE_SIGNAL_KINDS)[number];
+
+/** 单条信令 `data` 的最大字符数（服务端校验，防滥用；正常 SDP 约 2–4KB） */
+export const VOICE_SIGNAL_MAX_CHARS = 16384;
+
+/**
+ * v3.7：单个玩家在语音里的公开状态。
+ * 媒体走 WebRTC 点对点、**不经过服务器**；这里只同步「有没有加入 / 有没有静音」，
+ * 让双方 UI 一致，并让断线重连后能从 `room:state` 恢复。
+ */
+export interface VoicePlayerState {
+  /** 是否已点击「开启语音」加入媒体会话 */
+  active: boolean;
+  /** 是否已静音（静音只停发送，不断开连接） */
+  micMuted: boolean;
+}
+
+/** v3.7：`room:state.voice`（房间是否开语音 + 双方状态） */
+export interface VoiceRoomState {
+  /** 建房时房主是否开启连麦；false 时前端不渲染语音 UI、服务端拒绝语音事件 */
+  enabled: boolean;
+  you: VoicePlayerState;
+  opponent: VoicePlayerState;
+}
+
 export type ErrorCode =
   | 'INVALID_NAME'
   | 'INVALID_CODE'
@@ -49,6 +83,8 @@ export type ErrorCode =
   | 'INVALID_WORD'
   | 'INVALID_SUBMIT_LIMIT'
   | 'INVALID_INTERACT'
+  | 'INVALID_VOICE'
+  | 'VOICE_DISABLED'
   | 'REPLACED'
   | 'OPPONENT_LEFT'
   | 'ROOM_DELETED'
@@ -122,6 +158,8 @@ export interface PublicRoomState {
   agree: { you: boolean; opponent: boolean };
   /** 本房间填词时限（毫秒），创建时由房主设定；0 = 不限时 */
   submitLimitMs: number;
+  /** v3.7：本房间是否开语音（建房时选定，整局不变）+ 双方语音状态 */
+  voice: VoiceRoomState;
   /** countdown = 倒计时结束时刻；submitting = 提交截止（不限时为 null）；reveal = null（不再自动推进） */
   deadline: number | null;
   result: Result | null;
@@ -187,6 +225,8 @@ export interface CreatePayload {
   token?: string;
   /** 填词时限；缺省用 DEFAULT_SUBMIT_MS，非法值返回 INVALID_SUBMIT_LIMIT */
   submitLimitMs?: SubmitLimitMs;
+  /** v3.7：是否开启语音连麦；缺省（含旧客户端）= true。必须为布尔值，否则 INVALID_VOICE */
+  voiceEnabled?: boolean;
 }
 
 export interface JoinPayload {
@@ -210,6 +250,24 @@ export interface AgreePayload {
 /** v3.6：互动请求；kind 必须在 INTERACT_KINDS 内，否则 INVALID_INTERACT */
 export interface InteractPayload {
   kind: InteractKind;
+}
+
+/** v3.7：更新自己的语音状态（只需传要改的字段） */
+export interface VoiceStatePayload {
+  micMuted?: boolean;
+  active?: boolean;
+}
+
+/** v3.7：WebRTC 信令（客户端 → 服务端转发给对手；服务端 → 对手原样下发） */
+export interface VoiceSignalPayload {
+  kind: VoiceSignalKind;
+  data: string;
+}
+
+/** v3.7：信令转发 ack。delivered=false 表示对手离线 / 未在房间，信令未送达 */
+export interface VoiceSignalOk {
+  ok: true;
+  delivered: boolean;
 }
 
 /** 无载荷事件统一用它（socket.io 要求至少一个参数） */
@@ -274,6 +332,10 @@ export interface ClientToServerEvents {
   'round:agree': (payload?: AgreePayload, ack?: Ack<ActionResult<AgreeOk>>) => void;
   'round:next': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
   'room:interact': (payload: InteractPayload, ack?: Ack<ActionResult<InteractOk>>) => void;
+  /** v3.7：更新自己的语音状态（未开语音的房间返回 VOICE_DISABLED） */
+  'voice:state': (payload?: VoiceStatePayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
+  /** v3.7：把 WebRTC 信令转发给对手（未开语音 / 对手不在线时拒绝或 delivered=false） */
+  'voice:signal': (payload: VoiceSignalPayload, ack?: Ack<ActionResult<VoiceSignalOk>>) => void;
   'game:end': (payload?: EmptyPayload, ack?: Ack<ActionResult<SimpleOk>>) => void;
   'game:restart': (payload?: EmptyPayload, ack?: Ack<ActionResult<RestartOk>>) => void;
 }
@@ -287,6 +349,8 @@ export interface ServerToClientEvents {
   'room:notice': (payload: NoticePayload) => void;
   /** v3.6：有人对你发起互动（定向只发给对方；发送者靠 ack + 本地动画回显） */
   'room:interacted': (payload: InteractedPayload) => void;
+  /** v3.7：收到对手的 WebRTC 信令（服务端原样转发，不含发送者身份——只可能是房间里的对手） */
+  'voice:signal': (payload: VoiceSignalPayload) => void;
   'room:error': (payload: RoomErrorPayload) => void;
 }
 
@@ -308,6 +372,8 @@ export const CLIENT_EVENTS = [
   'round:agree',
   'round:next',
   'room:interact',
+  'voice:state',
+  'voice:signal',
   'game:end',
   'game:restart',
 ] as const satisfies readonly (keyof ClientToServerEvents)[];
@@ -320,5 +386,6 @@ export const SERVER_EVENTS = [
   'round:reveal',
   'room:notice',
   'room:interacted',
+  'voice:signal',
   'room:error',
 ] as const satisfies readonly (keyof ServerToClientEvents)[];

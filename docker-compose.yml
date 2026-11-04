@@ -20,6 +20,12 @@ services:
       # Compose 会自动读取根目录 .env 做变量替换（.env 已被 .gitignore / .dockerignore 排除）；
       # 留空 = 管理后台禁用（不影响正常游戏）。也可以在启动前 `export ADMIN_KEY=...` 覆盖。
       ADMIN_KEY: ${ADMIN_KEY:-}
+      # v3.7 语音连麦（可选）：不配也能玩，P2P 打不通时前端提示降级。
+      # 麦克风只在 HTTPS 或 localhost 可用；局域网 http://IP:3210 下语音 UI 自动隐藏。
+      STUN_URLS: ${STUN_URLS:-}
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_CREDENTIAL: ${TURN_CREDENTIAL:-}
     healthcheck:
       test:
         - CMD

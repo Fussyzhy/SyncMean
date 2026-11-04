@@ -46,6 +46,8 @@ export interface AdminRoomSummary {
   onlineCount: number;
   /** 房间级填词时限（毫秒）；0 = 不限时 */
   submitLimitMs: number;
+  /** v3.7：建房时房主是否开启语音连麦（房间级参数，整局不变） */
+  voice: boolean;
   /** countdown = 倒计时结束时刻；submitting = 提交截止（不限时为 null）；其余为 null */
   deadline: number | null;
   createdAt: number;

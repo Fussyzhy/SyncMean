@@ -121,6 +121,19 @@ watch(
           </button>
         </div>
       </div>
+      <div class="voice-toggle">
+        <label class="voice-toggle__row" for="voice-toggle">
+          <input
+            id="voice-toggle"
+            v-model="game.voiceEnabled"
+            class="voice-toggle__input"
+            type="checkbox"
+            :aria-checked="game.voiceEnabled ? 'true' : 'false'"
+          />
+          <span class="voice-toggle__text">开启连麦（语音局）</span>
+        </label>
+        <p class="voice-toggle__hint">语音为点对点，不经过服务器；开着连麦时这局不再是严格双盲</p>
+      </div>
       <button
         id="btn-create"
         class="btn btn--primary btn--block"

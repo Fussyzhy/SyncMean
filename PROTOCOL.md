@@ -1,6 +1,13 @@
-# 同声传意 · 联机版 —— 协议契约 v3.6（前后端唯一事实来源）
+# 同声传意 · 联机版 —— 协议契约 v3.7（前后端唯一事实来源）
 
 > 本文件由 Lead 维护，后端与前端都必须严格按此实现。任何字段名、事件名不得擅自改动；确有需要先在此文件里改。
+>
+> **v3.7 变更（相对 v3.6）——「房主可选语音连麦（WebRTC P2P）」**：
+> 1. **建房开关**：`room:create` 新增可选 `voiceEnabled: boolean`（缺省 **true**；非 boolean → `INVALID_VOICE`）。房间级参数，换轮 / `game:restart` 都不重置。`PublicRoomState` 新增 `voice`（见 §5.3）。
+> 2. **媒体点对点**：语音媒体走 WebRTC 直连，**不经过服务器、不落盘、不录音**；服务端只转发 `offer` / `answer` / `ice` 三种信令，**不解析、不存储**。新增客户端事件 `voice:state`（同步「是否加入 / 是否静音」）与 `voice:signal`（信令转发），新增服务端事件 `voice:signal`（定向给对手），新增错误码 `INVALID_VOICE` / `VOICE_DISABLED`。
+> 3. **公平性裁定（重要）**：开启语音的房间**不再是严格双盲**——提交阶段双方可以直接说话，这是房主显式选择的「朋友娱乐局」；默认开启，建房时可取消勾选。服务端不做任何语音内容检测/录制。此前 §5.1「绝不开放自由聊天」的硬约束**仅适用于语音关闭的房间**，语音开启房间由玩家自行约定。
+> 4. **HTTP**：新增 `GET /rtc-config`（`Cache-Control: no-store`）下发 ICE 服务器（`STUN_URLS` / `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL` 环境变量配置）；`Permissions-Policy` 由 `microphone=()` 改为 `microphone=(self)`。**麦克风只在安全上下文（HTTPS / localhost）可用**：局域网 `http://<IP>:3210` 下 `navigator.mediaDevices` 不存在，语音 UI 必须自动隐藏、不阻塞游戏。
+> 5. **DOM**：新增 `#voice-toggle`、`#voice-bar`、`#btn-voice`、`#btn-voice-mute`、`#voice-status`、`#voice-audio`（见 §9）。管理后台房间行新增 `voice` 字段（见 §14）。
 >
 > **v3.6 变更（相对 v3.5）——「玩家互动」重做，v3.4 快捷表情整体移除**：
 > 1. **删除 v3.4 快捷表情**：`room:emote`、`EMOTE_KINDS`（`nudge` / `thinking` / `cheer`）、`EMOTE_COOLDOWN_MS=8000`、`INVALID_EMOTE`、服务端生成互动 `room:notice` 文案、`Player.lastEmoteAt` 全部移除；服务端不再为任何互动生成文案。
@@ -103,10 +110,11 @@ docker-compose.yml     单实例编排（房间在内存，禁止扩副本）
 - 开发：`yarn dev` —— 后端 `tsx watch src/server/index.ts`（3210）+ Vite dev server（5173，`/socket.io` 与 `/health` 代理到 3210）。
 - 生产：`yarn build && yarn start` —— Vite 产出 `dist/public`、tsc 产出 `dist/server`，`node dist/server/index.js` 单进程托管。端口 `process.env.PORT || 3210`。
 - `GET /health` → `{ "ok": true, "rooms": <房间数> }`
+- **v3.7**：`GET /rtc-config` → `{ "iceServers": [{ "urls": [...] }, ...] }`（`Cache-Control: no-store`，公开信息无鉴权）。STUN/TURN 由环境变量配置：`STUN_URLS`（逗号分隔，缺省 `stun:stun.miwifi.com:3478,stun:stun.chat.bilibili.com:3478`）、可选 `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL`（配置 TURN 才追加）。默认不配 TURN：P2P 打不通时前端提示降级，游戏照常玩。
 - 静态目录 `dist/public`，`GET /` 返回 `dist/public/index.html`。
 - 未匹配的路由回落到 `index.html`（保证 `/?room=ABCD` 可用）。
 - 服务端日志前缀统一为 `[同声传意]`。
-- **v3.3 运维约定**：所有 HTTP 响应带安全头（CSP `default-src 'self'`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 关闭 camera/mic/geolocation）；`dist/public/assets/**` 由单独的静态路由提供，响应 `Cache-Control: public, max-age=31536000, immutable`（文件名带 hash，可放心长缓存）；`index.html` 等其余静态资源保持 `max-age=0`（每次校验）。
+- **v3.3 运维约定**：所有 HTTP 响应带安全头（CSP `default-src 'self'`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy: camera=(), microphone=(self), geolocation=()`）；`dist/public/assets/**` 由单独的静态路由提供，响应 `Cache-Control: public, max-age=31536000, immutable`（文件名带 hash，可放心长缓存）；`index.html` 等其余静态资源保持 `max-age=0`（每次校验）。**v3.7 起** microphone 对同源放开（语音连麦需要）；非安全上下文下前端必须自行隐藏语音 UI，不得因此报错。
 - **v3.3 关停**：SIGINT/SIGTERM 时先向所有房间广播关停 `room:notice`，延迟约 250ms 再 `io.close()`；最多 2 秒后进程退出。
 
 ## 3. 时间参数（v3.6）
@@ -119,7 +127,15 @@ const START_DELAY        = 300;   // 双方准备后稍等再倒计时
 const SETTLE_OFFLINE_GRACE_MS = 60000;  // v3.3：留守结算页的人离线多久后视为已退出
 const OFFLINE_ABORT_GRACE_MS  = 120000; // v3.3：主动对局中一方离线多久后中止对局
 const INTERACT_COOLDOWN_MS    = 1000;   // v3.6：玩家互动每人冷却（1 秒；被拒/离线不消耗）
+const VOICE_SIGNAL_MAX_CHARS  = 16384;  // v3.7：单条 voice:signal 的 data 最大字符数（服务端校验）
+const VOICE_SIGNAL_RATE_MAX   = 120;    // v3.7：同一玩家 10 秒窗口内最多转发条数，超出静默丢弃
+const VOICE_SIGNAL_RATE_WINDOW_MS = 10000;
 ```
+
+**v3.7 语音规则**：
+- `voiceEnabled` 是**房间级参数**（与 `submitLimitMs` 同级）：建房时确定，换轮 / `game:restart` 保持不变；加入者不能改。缺省 `true`。
+- 语音只同步「元状态」（`active` / `micMuted`），**不参与任何对局计时**：不计入 `deadline`、不影响 `submitLimitMs`、不影响离线兜底判定（语音连不上 ≠ 掉线）。
+- `voice:signal` 是纯转发：服务端只做 `kind` 白名单、`data` 长度上限、同房间两人定向投递；限流按「同一玩家 10 秒 120 条」静默丢弃（返回 `{ok:true, delivered:false}`，不算错误，避免把 ICE 候选的突发误报给玩家）。
 
 **v3.6 互动冷却规则**：
 - `INTERACT_COOLDOWN_MS=1000`（1 秒）只约束 `room:interact`：同一玩家两次**成功**发送之间至少间隔 1 秒。冷却中被拒返回 `{ok:true, accepted:false}`（不是错误，**不消耗冷却**），前端把三个互动按钮置为原生 `disabled`，约 1 秒后自动恢复。
@@ -148,6 +164,7 @@ Room {
   players: [Player],       // 最多 2 个，按加入顺序 seats = ['a','b']
   submissions: {a:Sub|null, b:Sub|null},  // Sub = {word, timedOut}
   submitLimitMs: number,           // v3.2：房间级填词时限，0 = 不限时；创建后整局不变
+  voiceEnabled: boolean,           // v3.7：房间级语音开关，创建后整局不变（缺省 true）
   agree: {a:boolean, b:boolean},   // v2：本轮同意词投票，进入新一轮/倒计时时全部清零
   lastGame: Snapshot|null,         // v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角
   result: Result|null,
@@ -156,7 +173,7 @@ Room {
   createdAt: number
 }
 Snapshot { round, basis:{a,b}|null, history:[HistoryItem], result:Result|null, endedAt:number } // v3.4：result 可为 null（未揭晓时结束本局）
-Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean, offlineAt:number|null, lastInteractAt:number|null } // v3.3：offlineAt 仅内部；v3.6：lastInteractAt 用于互动冷却（成功发送时刷新）
+Player { token, name, seat, socketId, ready, connected, isHost, settleDismissed:boolean, offlineAt:number|null, lastInteractAt:number|null, voiceActive:boolean, voiceMicMuted:boolean, voiceSignalCount:number, voiceSignalResetAt:number } // v3.3：offlineAt 仅内部；v3.6：lastInteractAt 用于互动冷却（成功发送时刷新）；v3.7：voice* 为语音元状态与信令限流窗口（断线/离开/重连一律复位）
 Result  { round, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy:'same'|'agree'|null }
 HistoryItem { round, basis:{a,b}|null, words:{a,b}, isWin, agree:{a,b}, winBy:'same'|'agree'|null }
 ```
@@ -175,7 +192,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 
 | 事件 | 请求体 | ack 成功返回 | 说明 |
 |---|---|---|---|
-| `room:create` | `{name, token?, submitLimitMs?}` | `{ok, code, token, seat:'a'}` | 建房，创建者即 seat a / host。`submitLimitMs` 必须在 `SUBMIT_LIMIT_OPTIONS` 内，缺省 `DEFAULT_SUBMIT_MS`；非法值 → `INVALID_SUBMIT_LIMIT` |
+| `room:create` | `{name, token?, submitLimitMs?, voiceEnabled?}` | `{ok, code, token, seat:'a'}` | 建房，创建者即 seat a / host。`submitLimitMs` 必须在 `SUBMIT_LIMIT_OPTIONS` 内，缺省 `DEFAULT_SUBMIT_MS`；非法值 → `INVALID_SUBMIT_LIMIT`。**v3.7**：`voiceEnabled` 为布尔，缺省 `true`，非布尔 → `INVALID_VOICE` |
 | `room:join` | `{code, name, token?}` | `{ok, code, token, seat, state}` | 加入或**断线重连**：若 token 命中房间内已有玩家 → 恢复该玩家（任意 phase 都允许） |
 | `room:leave` | `{}` | `{ok:true}` | 主动离开 |
 | `player:ready` | `{ready:boolean}` | `{ok:true}` | 仅 lobby 阶段有效 |
@@ -183,6 +200,8 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 | `round:agree` | `{agree:boolean}` | `{ok:true, agree:{a,b}, winBy:'agree'\|null}` | **v2**。仅 reveal 阶段有效。为本人投/撤「这两个词算同意词」。`agree` 缺省视为 `true`。两票齐 → 立即通关（`winBy:'agree'`）。幂等：重复投同一方向不报错 |
 | `round:next` | `{}` | `{ok:true}` | reveal 阶段：进入下一轮。v3.2 起**这是离开 reveal 的唯一方式**（不再自动推进） |
 | `room:interact` | `{kind:'poke'\|'tomato'\|'coffee'}` | `{ok:true, accepted:boolean}` | **v3.6**。仅 `submitting` 阶段有效（否则 `BAD_PHASE`）；`kind` 必须在 `INTERACT_KINDS` 内（否则 `INVALID_INTERACT`）。服务端按 `INTERACT_COOLDOWN_MS=1000`（1 秒）限流；对方不存在/离线或冷却中 → `accepted:false`（不发送、不消耗冷却）。成功时向**对方**定向发 `room:interacted {kind, name}`（**不含任何文案**，提示由前端按白名单生成），**不接受自由文本**。发送者不回显 |
+| `voice:state` | `{active?:boolean, micMuted?:boolean}` | `{ok:true}` | **v3.7**。更新自己的语音元状态（是否已加入语音 / 是否静音）。房间未开语音 → `VOICE_DISABLED`；非布尔字段 → `INVALID_VOICE`；无实际变化不广播。状态以 `room:state.voice` 回推为准，前端不得本地先行改 |
+| `voice:signal` | `{kind:'offer'\|'answer'\|'ice', data:string}` | `{ok:true, delivered:boolean}` | **v3.7**。把 WebRTC 信令转发给**对手**（服务端不解析、不存储、不排队）。未开语音 → `VOICE_DISABLED`；非法 `kind` / 非字符串 / 超 `VOICE_SIGNAL_MAX_CHARS` → `INVALID_VOICE`；对手不在线或触发限流 → `delivered:false` |
 | `game:end` | `{}` | `{ok:true}` | **v3.4**。仅 `countdown` / `submitting` / `reveal` 阶段有效（否则 `BAD_PHASE`）。把当前对局冻结进 `lastGame`（未揭晓时 `result=null`）并把房间内部重置为 `lobby`；**双方都保持 `settleDismissed=false`**，因此两人都会进入「本局结束」结算页（`phase:'won'` 视角）。随后可用 `game:restart` 各自退出并再来一局。幂等：内部已是 lobby 时再调 → `BAD_PHASE` |
 | `game:restart` | `{}` | `{ok:true, watching:boolean}` | won 阶段：**本人**退出结算页回到 lobby（round=1, basis=null, history=[], ready 全 false, result=null, agree 全 false；`submitLimitMs` 保持不变）。若对方还留在结算页，服务端把整局冻结成 `lastGame` 快照继续为 TA 呈现 won 视角（见 §5.3.1）。对方也已退出时 `lastGame` 才置 null。**v3.4**：前端在本人点过 restart 后，等对方也退出结算页会自动发 `player:ready` |
 
@@ -214,7 +233,15 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 - 对方不存在（房间只有自己 / 对方已离开）、对方 `connected===false`、或冷却中 → `{ok:true, accepted:false}`，不发送、不消耗冷却。
 - 成功：记录 `lastInteractAt`，向**对方**定向发 `room:interacted {kind, name}`（`name` = 发送者昵称，**不含任何文案字段**）；服务端不再生成互动文案，也不再发 `room:notice`。发送者不回显，只靠 ack 进入约 1s 冷却。
 - 前端（接收方）：按白名单生成提示并播放全屏特效——`poke` → 「{name} 戳了戳你」（手指戳屏 + 整屏摇晃，约 1.1s）；`tomato` → 「{name} 朝你扔了个番茄 🍅」（番茄飞入 + 果肉飞溅 + 红闪，约 1.6s）；`coffee` → 「{name} 给你倒了杯咖啡 ☕」（杯子倾倒 + 液体流下 + 水滩，约 2.0s）。特效只做视觉反馈，**不阻塞输入/提交**。
-- **硬约束**：绝不支持自由文本/自定义互动——双盲阶段任何文字都可能暗示自己的词，破坏公平。
+- **硬约束**：绝不支持自由文本/自定义互动——双盲阶段任何文字都可能暗示自己的词，破坏公平。**v3.7 例外**：`voiceEnabled===true` 的房间由房主显式选择「语音局」，此时双盲不再由服务器保证（语音内容不在服务器管辖范围），上文约束仅适用于语音关闭的房间。
+
+`voice:state` / `voice:signal` 细则（v3.7）：
+- 仅房间内玩家可调用（否则 `NOT_IN_ROOM`）；房间 `voiceEnabled===false` 时两者一律 `VOICE_DISABLED`。
+- `voice:state`：只接受布尔 `active` / `micMuted`，其它类型（含字符串 `"true"`）→ `INVALID_VOICE`；未出现的字段保持原值；未知字段忽略；无实际变化时不广播。
+- `voice:signal`：`kind` 必须在 `VOICE_SIGNAL_KINDS = ['offer','answer','ice']` 内；`data` 必须是 string 且 `Array.from(data).length <= VOICE_SIGNAL_MAX_CHARS`；其它一律 `INVALID_VOICE`。
+- 定向：**只发给对手**（另一 seat 的玩家），发送者收不到自己的信令；对手 `socketId` 为空或 `connected===false` → `{ok:true,delivered:false}`（不排队、不缓存）。
+- 限流：同一玩家 10 秒窗口内最多 `VOICE_SIGNAL_RATE_MAX=120` 条，超出静默丢弃（`delivered:false`，不报错）。
+- 断线 / 离开 / 带 token 重连：服务端把该玩家 `voiceActive=false`、`voiceMicMuted=false` 并广播 `room:state`；前端重连后自行重新协商（服务端不保存任何 SDP / candidate）。
 
 `game:end` 细则（v3.4）：
 - 仅 `countdown` / `submitting` / `reveal` 允许，否则 `BAD_PHASE`；不在房间 `NOT_IN_ROOM`。
@@ -234,6 +261,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 | `round:reveal` | `{round, basis, words:{a,b}, isWin, timedOut:{a,b}, agree:{a,b}, winBy, history}` | 双方都提交（或计时房间到点自动提交）后，**同时**揭晓。此刻 `agree` 必为 `{a:false,b:false}`、`winBy` 为 `'same'` 或 `null`。v3.2 起揭晓后不自动推进 |
 | `room:notice` | `{text:string, kind:'join'\|'leave'\|'info'\|'system'}` | 有人进出、同意词通关、本局结束（v3.4）等提示，前端做 toast。**v3.6 起互动不再走 `room:notice`**（改用定向 `room:interacted`） |
 | `room:interacted` | `{kind:'poke'\|'tomato'\|'coffee', name:string}` | **v3.6**。有人对你发起互动：**定向只发给被互动的一方**（发送者不发），接收方据此播放全屏特效并按白名单生成提示文案。不含任何自由文本 |
+| `voice:signal` | `{kind:'offer'\|'answer'\|'ice', data:string}` | **v3.7**。对手的 WebRTC 信令：**定向只发给对手**，服务端原样透传（不解析/不存储/不排队）。载荷里没有发送者身份——只可能是本房间另一座位 |
 | `room:error` | `{code, message}` | 会话级错误（`OPPONENT_LEFT`、`REPLACED`、`ROOM_DELETED`） |
 
 ### 5.3 PublicRoomState（前端渲染的唯一依据）
@@ -253,6 +281,11 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
   settlePending: false,                        // v2.1：Boolean(room.lastGame)，即「有一局结算还挂着没人收」
   agree:     { you: false, opponent: false },   // v2，只给布尔；reveal 阶段之外恒为 false
   submitLimitMs: 60000,                         // v3.2：房间级填词时限（毫秒），0 = 不限时
+  voice: {                                      // v3.7：房间是否开语音 + 双方语音元状态（此时无媒体流信息）
+    enabled: true,
+    you:      { active: false, micMuted: false },
+    opponent: { active: false, micMuted: false }
+  },
   deadline: 1761882000000 | null,               // 服务端毫秒时间戳；null 表示无倒计时
   result: {
     round, words:{a,b}, isWin, timedOut:{a,b},
@@ -305,7 +338,7 @@ socket.emit('room:create', { name, token?, submitLimitMs? }, (res) => { ... })
 
 ### 5.4 错误码
 
-`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `INVALID_SUBMIT_LIMIT`(填词时限不在 `SUBMIT_LIMIT_OPTIONS` 内) `INVALID_INTERACT`(互动类型不在 `INTERACT_KINDS` 内) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
+`INVALID_NAME`(昵称为空/超 12 字) `INVALID_CODE` `ROOM_NOT_FOUND` `ROOM_FULL` `ROOM_IN_PROGRESS` `NOT_IN_ROOM` `BAD_PHASE` `INVALID_WORD`(空或超 12 字) `INVALID_SUBMIT_LIMIT`(填词时限不在 `SUBMIT_LIMIT_OPTIONS` 内) `INVALID_INTERACT`(互动类型不在 `INTERACT_KINDS` 内) `INVALID_VOICE`(v3.7：`voiceEnabled` 非布尔 / 语音状态字段非布尔 / 信令 kind 非法或 data 超长) `VOICE_DISABLED`(v3.7：房间未开启语音) `REPLACED` `OPPONENT_LEFT` `ROOM_DELETED` `INTERNAL`
 
 `message` 一律中文，可直接展示给玩家。同意词相关的所有拒绝都用 `BAD_PHASE`，不新增错误码。
 
@@ -409,6 +442,18 @@ lobby --(双方都 restart 后，前端自动 player:ready)--> 双方 ready → 
 - `coffee`：杯子倾倒 + 液体流下 + 水滩，约 2.0s。
 - 同一时刻可叠加多个特效元素；特效只做视觉反馈，**不得阻塞输入/提交**（`pointer-events:none`）。
 
+**v3.7 新增（语音连麦）**：
+
+```
+#voice-toggle         首页建房表单的「开启连麦（语音局）」勾选框（默认勾选；type=checkbox，aria-checked 与 checked 一致）
+#voice-bar            全局语音条容器（仅「在房间内」且 state.voice.enabled 时渲染；浏览器不支持语音时整条不渲染）
+#btn-voice            「开启语音」/「关闭语音」按钮（active 时文案为关闭语音）
+#btn-voice-mute       「静音」/「取消静音」按钮（仅语音 active 时渲染）
+#btn-voice-play       （可选）远端音频被自动播放策略拦下时出现的「点我播放」按钮
+#voice-status         语音状态文案（固定：未开启语音 / 等对方开启语音 / 语音连接中… / 语音已连接 / 语音连接失败，可继续打字；对方静音时在「语音已连接」后加「（对方已静音）」）
+#voice-audio          隐藏的 <audio autoplay playsinline>，承载远端音轨（srcObject）
+```
+
 **v2 新增（同意词投票）**，位于对局视图的揭晓面板内：
 
 ```
@@ -455,11 +500,12 @@ lobby --(双方都 restart 后，前端自动 player:ready)--> 双方 ready → 
 8. **结算与导出**：`phase==='won'` 时展示 `#view-settle`，`#settle-rounds` 至少列出所有已玩轮次；点 `#btn-export` 产出一张 PNG（`blob` 或 `dataURL`），文件名含房间码，页面上给出成功/失败提示，且**导出失败不得影响游戏继续**。
 9. **结算页各自退出（v2.1）**：A 点 `game:restart` 后——A 立刻是 lobby 视角（能看准备页、能点准备），**B 仍是 won 视角**（`state.phase==='won'`、`history`/`result` 等于通关那一刻的快照、`deadline===null`），B 的 `history` 不得被清空、不得被换成新一轮的空数据；B 此时点 `player:ready` 必须 `BAD_PHASE`；B 留在结算页期间仍可导出图片且内容与被踢无关。B 再点 `game:restart` 后两人才都进 lobby，`lastGame` 置 null。断言 ack 的 `watching` 字段：A 那次为 `true`、B 那次为 `false`。另需覆盖：留守方**断线重连后仍在结算页**；一方在对方留守时 `room:leave` → 留守方脱离假 won（收到 `OPPONENT_LEFT`/`aborted`，`lastGame` 被清）。
 10. **新房不得被结算锁定误伤（v2.1 回归）**：全新房间、从未打过一局时 `state.settlePending === false` 且所有 `players[].settleDismissed === false`，此时准备按钮**必须可用**、`player:ready` 必须成功、双方准备后必须进入 countdown。页面上 `#room-tip` 在真正出现留守者前不得显示「还在看结算」类文案。
-11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit / #opponent-offline / #btn-copy-waiting / #btn-end / #interact-row / #interact-fx 这些 DOM id 必须存在。
+11. **v3 工程层验收**：`yarn typecheck` 三套配置（server / app / tests）0 错误；`yarn build` 同时产出 `dist/server/index.js` 与 `dist/public/index.html`；仓库内不再有 `.js` 业务源码（除构建产物与配置）；`yarn verify:ui` 真浏览器验收全过，且 #reveal-verdict / #agree-hint / #submit-limit-group / #room-limit / #opponent-offline / #btn-copy-waiting / #btn-end / #interact-row / #interact-fx 这些 DOM id 必须存在；**v3.7 追加** `#voice-toggle` / `#voice-bar` / `#btn-voice` / `#btn-voice-mute` / `#voice-status` / `#voice-audio`（浏览器支持语音时；不支持时 `#voice-bar` 整条不渲染，验收脚本需按 `supported` 分支断言）。
 12. **明暗模式（v3.1）**：无存储时跟随系统 `prefers-color-scheme`；系统能力不可用（无 `matchMedia`）时**兜底明亮**；`#btn-theme` 单击切换并把 `321:theme` 写入 localStorage，刷新后保持；Shift+单击清除存储回到「跟随系统」；深浅两套主题的 `body` 背景色不同、正文与按钮文字对比度 ≥ 4.5:1；`<html data-theme>`、`data-theme-source` 与 `<meta name="theme-color">` 同步更新。
 13. **填词时限（v3.2）**：`yarn test` 断言——默认创建（不传 `submitLimitMs`）时 `state.submitLimitMs===60000` 且 `round:open.deadline ≈ now+60000`；创建传 `180000` 时 `state.submitLimitMs===180000`、`round:open.deadline-now ∈ [170000,182000]`；非法值（如 `90000`、字符串）返回 `INVALID_SUBMIT_LIMIT`；传 `0` 时 `round:open.deadline===null`、等待一段时间仍停在 `submitting` 且不自动揭晓、双方提交后正常 `round:reveal`；`game:restart` 后新 lobby 的 `state.submitLimitMs` 与建房时一致。浏览器验收需覆盖：首页可选四种时限、房间页 `#room-limit` 显示正确、不限时房间 `#timer` 显示「不限时」且无进度条、揭晓后无自动跳转（停留超过原 4.5s 仍在 reveal，`#btn-next` 可手动进入下一轮）。
 14. **离线兜底（v3.3）**：`yarn test` 断言——`disconnect` 后记录 `offlineAt`、带 token 重连后清空；`offlineAt` 回拨超过 `OFFLINE_ABORT_GRACE_MS` 后 `sweep()` → `phase='aborted'`、`deadline=null`、在线方收到 `room:error{code:'OPPONENT_LEFT'}`（未超时则相位不变）；A `game:restart` 后 B 断线、B 的 `offlineAt` 回拨超过 `SETTLE_OFFLINE_GRACE_MS` → `sweep()` 后 `B.settleDismissed=true`、`lastGame=null`、A 的 `player:ready` 成功（未超时仍被拒）；`Game.announceShutdown()` 对每个房间广播 `room:notice`。HTTP：`/health` 响应含 CSP（`default-src 'self'`）、`x-content-type-options: nosniff`、`referrer-policy: no-referrer`；生产构建下 `/assets/*` 的 `Cache-Control` 同时含 `immutable` 与 `max-age=31536000`。浏览器验收：提交后等待提示包含「等对方」与「已等 m:ss」；对手掉线后对局页出现 `#opponent-offline`。
 15. **玩家互动与结束本局（v3.6，替换 v3.4 快捷表情）**：`yarn test` 断言——`room:interact` 在 `submitting` 阶段成功返回 `accepted:true`，且**只有对方**收到 `room:interacted {kind, name}`（`name` 为发送者昵称，**载荷不含任何文案字段**；发送者收不到）；1s 内第二次 `accepted:false`；非法 `kind`（含自由文本）返回 `INVALID_INTERACT`；非 submitting 阶段返回 `BAD_PHASE`；对方离线返回 `accepted:false`。`game:end` 在 reveal 阶段成功后双方 state 变为 `phase='won'`、`settlePending=true`、`result.isWin=false`、history 保留；内部 `lastGame.result` 在未揭晓阶段结束时为 `null`；lobby/won 阶段调用返回 `BAD_PHASE`。浏览器验收：A 提交后 `#interact-row` 出现且三个按钮（`#btn-interact-poke` / `#btn-interact-tomato` / `#btn-interact-coffee`）都在；点 `#btn-interact-poke` 后按钮进入约 1s 冷却（`disabled`），B 端出现「戳了戳你」提示并播放 poke 特效（`#interact-fx .fx-item--poke`，`body` 短暂带 `is-fx-shake`），随后分别触发 tomato / coffee 时 B 端提示含「番茄」/「咖啡」并出现对应 `.fx-item--<kind>`（三张特效截图作为视觉基线）；对局中 `#btn-end` 点两次（二次确认）后双方进入 `#view-settle` 且 `#settle-title` 为「本局结束」；随后双方各点 `#btn-restart`，**无需再点准备**即自动进入下一局倒计时（自动准备）。
+16. **语音连麦（v3.7）**：`yarn test` 断言——默认建房（不传 `voiceEnabled`）`state.voice.enabled===true`；传 `false` 时 `enabled===false` 且该房间 `voice:state` / `voice:signal` 返回 `VOICE_DISABLED`；`voiceEnabled` 非布尔 → `INVALID_VOICE` 且不建房；双方 `voice.you/opponent` 初值均 `{active:false, micMuted:false}`；`voice:state` 更新后双方 `room:state` 一致（对方看到 `opponent.active`），无变化不多广播；`voice:signal` 只投递给对手且载荷与发送端**完全一致**（发送端收不到），对手离线时 `delivered:false`；非法 `kind` / 超 `VOICE_SIGNAL_MAX_CHARS` → `INVALID_VOICE`；`game:restart` 后 `voiceEnabled` 保持；断线重连后语音元状态复位为 `false`；`GET /rtc-config` 返回 `{iceServers:Array}` 且响应头含 `Cache-Control: no-store`；`Permissions-Policy` 含 `microphone=(self)`。浏览器验收（需 fake media 启动参数，至少覆盖一条真实建连）：`#voice-toggle` 默认勾选；打开 `#voice-bar` 后双方各点 `#btn-voice` → `#voice-status` 最终为「语音已连接」，点 `#btn-voice-mute` 后对方 `#voice-status` 含「（对方已静音）」。**不允许**把语音失败计入对局错误（连接失败只提示、游戏照常）。
 
 ## 11. 导出图片契约（纯前端）
 
@@ -532,6 +578,7 @@ lobby --(双方都 restart 后，前端自动 player:ready)--> 双方 ready → 
 - `AdminRoomDetail` 在 `settlePending=true` 时，`round` / `basis` / `result` / `history` 取**快照**值（与玩家 §5.3.1 的 won 视角一致），`submitted` / `agree` 恒为 false，`settleEndedAt` = 快照冻结时刻；否则取实时房间值，`settleEndedAt=null`。
 - `deadline`：`countdown` = 倒计时结束时刻，`submitting` = 提交截止（本房间不限时为 null），其余为 null。
 - 观战是**只读**的：管理后台不得伪造/发送任何玩家事件（`round:submit` 等）。
+- **v3.7**：`AdminRoomSummary.voice: boolean` 表示房间是否开启语音；管理员**不参与语音**（不 join 媒体、不接收 `voice:signal`、不向玩家转发信令），语音内容对管理后台不可观测，也**不得**为此新增任何音频存储。
 
 ### 14.3 终止房间语义
 

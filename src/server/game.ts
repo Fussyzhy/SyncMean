@@ -16,7 +16,13 @@
 import { randomInt, randomUUID } from 'node:crypto';
 
 import type { AdminDeleteOk, AdminRoomDetail, AdminRoomSummary } from '../shared/admin.js';
-import { DEFAULT_SUBMIT_MS, INTERACT_KINDS, SUBMIT_LIMIT_OPTIONS } from '../shared/protocol.js';
+import {
+  DEFAULT_SUBMIT_MS,
+  INTERACT_KINDS,
+  SUBMIT_LIMIT_OPTIONS,
+  VOICE_SIGNAL_KINDS,
+  VOICE_SIGNAL_MAX_CHARS,
+} from '../shared/protocol.js';
 import type {
   ActionError,
   ActionResult,
@@ -39,6 +45,9 @@ import type {
   SimpleOk,
   SubmitLimitMs,
   SubmitOk,
+  VoicePlayerState,
+  VoiceSignalKind,
+  VoiceSignalOk,
   WinBy,
 } from '../shared/protocol.js';
 
@@ -46,6 +55,8 @@ import type {
 const COUNTDOWN_MS = 3000; // 3-2-1
 const START_DELAY = 300; // 双方准备后稍等再倒计时
 const INTERACT_COOLDOWN_MS = 1000; // v3.6：玩家互动冷却（1 秒内重复互动不送达）
+const VOICE_SIGNAL_RATE_WINDOW_MS = 10 * 1000; // v3.7：语音信令限流窗口（10 秒）
+const VOICE_SIGNAL_RATE_MAX = 120; // v3.7：单窗口内最多转发的信令条数，超出静默丢弃
 
 // 全员离线后的房间保留时长与清理扫描周期（PROTOCOL.md §8）
 const OFFLINE_ROOM_TTL_MS = 10 * 60 * 1000;
@@ -78,6 +89,8 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   INVALID_WORD: '词需为 1–12 个字符',
   INVALID_SUBMIT_LIMIT: '填词时限只能是不限时 / 1 分钟 / 3 分钟 / 5 分钟',
   INVALID_INTERACT: '互动类型无效',
+  INVALID_VOICE: '语音参数无效',
+  VOICE_DISABLED: '本房间未开启语音',
   REPLACED: '你的连接已在别处打开，当前会话被顶替',
   OPPONENT_LEFT: '对手已离开房间',
   ROOM_DELETED: '房间已解散',
@@ -88,6 +101,9 @@ export const constants = {
   COUNTDOWN_MS,
   START_DELAY,
   INTERACT_COOLDOWN_MS,
+  VOICE_SIGNAL_RATE_WINDOW_MS,
+  VOICE_SIGNAL_RATE_MAX,
+  VOICE_SIGNAL_MAX_CHARS,
   OFFLINE_ROOM_TTL_MS,
   SWEEP_INTERVAL_MS,
   SETTLE_OFFLINE_GRACE_MS,
@@ -123,6 +139,14 @@ export interface Player {
   offlineAt: number | null;
   /** v3.6：上次成功发起互动的时刻（毫秒）；冷却判定用，重连后保留 */
   lastInteractAt: number | null;
+  /** v3.7：是否已加入语音媒体会话（媒体走 P2P，服务器只同步这个公开状态） */
+  voiceActive: boolean;
+  /** v3.7：麦克风是否静音（静音只停发送，不断开连接） */
+  voiceMicMuted: boolean;
+  /** v3.7：当前限流窗口内已转发的信令条数（内部，不下发） */
+  voiceSignalCount: number;
+  /** v3.7：当前限流窗口结束时刻（毫秒，内部，不下发） */
+  voiceSignalResetAt: number;
 }
 
 /** v2.1：整局结束后的冻结快照，供未退出结算页的玩家继续 won 视角 */
@@ -147,6 +171,11 @@ export interface Room {
   agree: AgreePair;
   /** 房间级填词时限（毫秒）：创建时确定，整局（含 restart / 换轮）不变；0 = 不限时 */
   submitLimitMs: SubmitLimitMs;
+  /**
+   * v3.7 房间级语音开关：建房时由房主选定，整局（含 restart / 换轮 / 重开）不变。
+   * false 时服务端拒绝所有语音事件，前端也不渲染语音 UI。
+   */
+  voiceEnabled: boolean;
   lastGame: Snapshot | null;
   result: Result | null;
   history: HistoryItem[];
@@ -254,6 +283,24 @@ function validateSubmitLimit(raw: unknown): SubmitLimitValidation {
 }
 
 /**
+ * v3.7 房间级语音开关（PROTOCOL.md §5.1）：建房时由房主选定。
+ * 缺省（undefined / null，含旧客户端）= 开启；只接受布尔值，其余一律 INVALID_VOICE
+ * （字符串 "yes" / 数字 1 等都不做 truthy 归一，避免旧前端把开关误传成真）。
+ */
+type VoiceEnabledValidation = { ok: true; value: boolean } | ActionError;
+
+function validateVoiceEnabled(raw: unknown): VoiceEnabledValidation {
+  if (raw === undefined || raw === null) return { ok: true, value: true };
+  if (typeof raw !== 'boolean') return fail('INVALID_VOICE');
+  return { ok: true, value: raw };
+}
+
+/** v3.7：语音事件的请求载荷必须是普通对象（null / 数组 / 标量一律按非法载荷处理） */
+function isPayloadObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
  * PROTOCOL.md §6 的判定归一化：
  * NFKC、小写、去掉空白 / 标点 / 符号。
  */
@@ -344,6 +391,8 @@ export class Game {
     if (!nameRes.ok) return nameRes;
     const limitRes = validateSubmitLimit(payload.submitLimitMs);
     if (!limitRes.ok) return limitRes;
+    const voiceRes = validateVoiceEnabled(payload.voiceEnabled);
+    if (!voiceRes.ok) return voiceRes;
 
     const code = this._generateCode();
     const token = sanitizeToken(payload.token) || randomUUID();
@@ -358,6 +407,10 @@ export class Game {
       settleDismissed: false, // v2.1：是否已退出结算页（PROTOCOL.md §5.3.1）
       offlineAt: null, // v3.3：新建玩家在线，尚未离线
       lastInteractAt: null, // v3.6：尚未发起过互动
+      voiceActive: false, // v3.7：默认未加入语音会话
+      voiceMicMuted: false, // v3.7：默认未静音
+      voiceSignalCount: 0, // v3.7：信令限流窗口初始为空
+      voiceSignalResetAt: 0,
     };
 
     const room: Room = {
@@ -369,6 +422,7 @@ export class Game {
       submissions: { a: null, b: null },
       agree: { a: false, b: false }, // v2：本轮同意词投票（PROTOCOL.md §4）
       submitLimitMs: limitRes.value, // 房间级填词时限，创建时选定、整局不变
+      voiceEnabled: voiceRes.value, // v3.7：房间级语音开关，创建时选定、整局不变
       result: null,
       history: [],
       lastGame: null, // v2.1：整局结束后的冻结快照，供未退出者继续 won 视角
@@ -401,6 +455,9 @@ export class Game {
         existing.socketId = socketId || null;
         existing.connected = true;
         existing.offlineAt = null; // v3.3：重连成功，离线计时清零
+        // v3.7：重连后前端会重新协商 WebRTC，语音公开状态先复位（服务端不保存任何信令）
+        existing.voiceActive = false;
+        existing.voiceMicMuted = false;
         room.allOfflineAt = null;
         room.lastActivityAt = Date.now();
         if (oldSocketId && oldSocketId !== existing.socketId) {
@@ -440,6 +497,10 @@ export class Game {
       settleDismissed: false, // v2.1：新玩家从不属于上一局的结算页
       offlineAt: null, // v3.3：新玩家在线，尚未离线
       lastInteractAt: null, // v3.6：尚未发起过互动
+      voiceActive: false, // v3.7：新玩家默认未加入语音会话
+      voiceMicMuted: false, // v3.7：新玩家默认未静音
+      voiceSignalCount: 0, // v3.7：信令限流窗口初始为空
+      voiceSignalResetAt: 0,
     };
     room.players.push(player);
     // v2.1：新玩家加入同一房间 → 上一局的结算快照作废，没人该卡在假 won
@@ -465,6 +526,9 @@ export class Game {
     const { room, player } = found;
 
     this._clearTimer(room);
+    // v3.7：离开房间即退出语音会话（媒体 P2P，服务器这边只复位公开状态）
+    player.voiceActive = false;
+    player.voiceMicMuted = false;
     const index = room.players.indexOf(player);
     if (index >= 0) room.players.splice(index, 1);
     // v2.1：留守结算页的人从自己的视角看「这局还没结束」，被丢下等同对局中离开
@@ -576,6 +640,84 @@ export class Game {
     player.lastInteractAt = now;
     this._emitPlayer(opponent, 'room:interacted', { kind: interactKind, name: player.name });
     return { ok: true, accepted: true };
+  }
+
+  /**
+   * v3.7：更新自己的语音公开状态（PROTOCOL.md §5.1）。
+   * 只接受 `micMuted` / `active` 两个可选布尔字段：未出现的字段保持不变、未知字段忽略；
+   * 无实际变化时不广播（避免无意义 state 风暴）。房间未开语音一律 VOICE_DISABLED。
+   * 媒体本身走 WebRTC 点对点，服务端只同步「有没有加入 / 有没有静音」。
+   */
+  setVoiceState(socketId: string | null, payload: unknown = {}): ActionResult<SimpleOk> {
+    const found = this._findBySocket(socketId);
+    if (!found) return fail('NOT_IN_ROOM');
+    const { room, player } = found;
+    if (!room.voiceEnabled) return fail('VOICE_DISABLED');
+    if (!isPayloadObject(payload)) return fail('INVALID_VOICE');
+
+    let active = player.voiceActive;
+    let micMuted = player.voiceMicMuted;
+    if (Object.prototype.hasOwnProperty.call(payload, 'active')) {
+      if (typeof payload.active !== 'boolean') return fail('INVALID_VOICE');
+      active = payload.active;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'micMuted')) {
+      if (typeof payload.micMuted !== 'boolean') return fail('INVALID_VOICE');
+      micMuted = payload.micMuted;
+    }
+
+    // 幂等：没有实际变化就不广播（前端可能重复上报同一状态）
+    if (active === player.voiceActive && micMuted === player.voiceMicMuted) return { ok: true };
+
+    player.voiceActive = active;
+    player.voiceMicMuted = micMuted;
+    room.lastActivityAt = Date.now();
+    this.broadcastState(room);
+    return { ok: true };
+  }
+
+  /**
+   * v3.7：把一条 WebRTC 信令**原样**转发给对手（PROTOCOL.md §5.1）。
+   *
+   * 服务端只做三件事：白名单校验 `kind`、长度校验 `data`、原样 `_emitPlayer`。
+   * **绝不解析 SDP / candidate 语义，绝不存储、绝不落盘**（不写日志、不进 state）。
+   * - 对手不在房间 / 离线：`{ok:true, delivered:false}`（不是错误，前端停止等待即可）；
+   * - 限流：同一玩家 10 秒窗口最多 120 条，超出**静默丢弃**（同样 delivered:false，
+   *   不报错——避免把错误码变成探测/放大通道）。
+   */
+  relayVoiceSignal(socketId: string | null, payload: unknown = {}): ActionResult<VoiceSignalOk> {
+    const found = this._findBySocket(socketId);
+    if (!found) return fail('NOT_IN_ROOM');
+    const { room, player } = found;
+    if (!room.voiceEnabled) return fail('VOICE_DISABLED');
+    if (!isPayloadObject(payload)) return fail('INVALID_VOICE');
+
+    const kind = payload.kind;
+    if (typeof kind !== 'string' || !(VOICE_SIGNAL_KINDS as readonly string[]).includes(kind)) {
+      return fail('INVALID_VOICE');
+    }
+    const data = payload.data;
+    if (typeof data !== 'string' || charLength(data) > VOICE_SIGNAL_MAX_CHARS) {
+      return fail('INVALID_VOICE');
+    }
+
+    const opponent = room.players.find((p) => p.seat !== player.seat) || null;
+    // 对方不存在 / 已离线：信令无处可去，ack 用 delivered:false 明确告知
+    if (!opponent || !opponent.socketId || !opponent.connected) {
+      return { ok: true, delivered: false };
+    }
+
+    // 10 秒滑动窗口限流：先判过期再计数，超限静默丢弃
+    const now = Date.now();
+    if (player.voiceSignalResetAt <= now) {
+      player.voiceSignalCount = 0;
+      player.voiceSignalResetAt = now + VOICE_SIGNAL_RATE_WINDOW_MS;
+    }
+    player.voiceSignalCount += 1;
+    if (player.voiceSignalCount > VOICE_SIGNAL_RATE_MAX) return { ok: true, delivered: false };
+
+    this._emitPlayer(opponent, 'voice:signal', { kind: kind as VoiceSignalKind, data });
+    return { ok: true, delivered: true };
   }
 
   /**
@@ -731,6 +873,9 @@ export class Game {
     player.connected = false;
     player.socketId = null;
     player.offlineAt = Date.now(); // v3.3：记录离线起点，供 sweep 的两段离线兜底使用
+    // v3.7：断线即视为离开语音会话（对方会看到 active=false）；重连后由前端重新协商
+    player.voiceActive = false;
+    player.voiceMicMuted = false;
     room.lastActivityAt = Date.now();
     if (room.players.every((p) => !p.connected)) room.allOfflineAt = Date.now();
     this.broadcastState(room);
@@ -857,6 +1002,12 @@ export class Game {
       agree: settleView ? { you: false, opponent: false } : agreeView,
       // 房间级填词时限：对所有人（含结算快照视角）都下发同一个房间值
       submitLimitMs: room.submitLimitMs,
+      // v3.7：房间级语音开关 + 双方公开语音状态（按玩家 seat 映射 you / opponent）
+      voice: {
+        enabled: room.voiceEnabled,
+        you: this._voiceOf(player),
+        opponent: this._voiceOf(opponent),
+      },
       deadline: settleView ? null : room.deadline == null ? null : room.deadline,
       result: settleView ? this._publicResult(settleView.result) : this._publicResult(room.result),
       history: this._publicHistory(settleView ? settleView.history : room.history),
@@ -900,6 +1051,8 @@ export class Game {
       playerCount: players.length,
       onlineCount: players.filter((p) => p.connected).length,
       submitLimitMs: room.submitLimitMs,
+      // v3.7：管理后台列表也展示房间是否开语音（只读，不含任何信令 / 媒体信息）
+      voice: room.voiceEnabled,
       deadline: counting ? room.deadline ?? null : null,
       createdAt: room.createdAt,
       lastActivityAt: room.lastActivityAt,
@@ -1192,6 +1345,14 @@ export class Game {
         ? { a: Boolean(result.agree.a), b: Boolean(result.agree.b) }
         : { a: false, b: false },
       winBy: result.winBy === 'same' || result.winBy === 'agree' ? result.winBy : null,
+    };
+  }
+
+  /** v3.7：公开语音状态（对方不存在的房间 / 单人房一律 false，前端无需分支） */
+  _voiceOf(player: Player | null): VoicePlayerState {
+    return {
+      active: Boolean(player && player.voiceActive),
+      micMuted: Boolean(player && player.voiceMicMuted),
     };
   }
 

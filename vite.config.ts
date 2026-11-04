@@ -36,6 +36,8 @@ export default defineConfig({
     proxy: {
       '/socket.io': { target: 'http://127.0.0.1:3210', ws: true },
       '/health': { target: 'http://127.0.0.1:3210' },
+      // v3.7：语音 ICE 配置（STUN/TURN）由后端环境变量下发，dev 也要代理
+      '/rtc-config': { target: 'http://127.0.0.1:3210' },
     },
   },
   css: {

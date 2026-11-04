@@ -21,6 +21,7 @@
 @use 'settle';      // 结算页：逐轮记录 / 统计 / 操作区 / 历史
 @use 'overlay';     // 覆盖层：倒计时 / toast / 断网 / 音效 / 撒花
 @use 'interact';    // v3.6 玩家互动特效层：戳一戳 / 扔番茄 / 倒咖啡（#interact-fx）
+@use 'voice';       // v3.7 语音连麦：全局语音条（#voice-bar）+ 首页「开启连麦」（#voice-toggle）
 @use 'animations';  // 全部 @keyframes
 @use 'responsive';  // 359px / 600px / reduced-motion 媒体查询
 @use 'admin';       // 管理后台（/admin，全部作用域收在 #view-admin 下，不影响游戏页）

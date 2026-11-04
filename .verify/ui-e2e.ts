@@ -11,6 +11,8 @@
  * v3.4 追加：结束本局（二次确认）后双方结算、再来一局自动准备。
  * v3.6 追加：玩家互动（戳一戳 / 扔番茄 / 倒咖啡）——1s 冷却按钮态、接收方定向提示与三种全屏特效，
  *           并留 22/23/24 三张特效截图作为视觉验收基线。
+ * v3.7 追加：语音连麦——#voice-toggle 默认勾选；两端各点 #btn-voice 后在 headless fake mic 下
+ *           真正建立 WebRTC 连接（#voice-status=语音已连接）、静音状态经 room:state 双向同步。
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -245,6 +247,11 @@ class Browser {
       '--disable-extensions',
       '--hide-scrollbars',
       '--mute-audio',
+      // v3.7 语音连麦：headless 下用假麦克风设备 + 自动授权的权限 UI，
+      // 并放开自动播放策略（远端音轨挂到 <audio autoplay> 时不应被拦截）。
+      '--use-fake-device-for-media-stream',
+      '--use-fake-ui-for-media-stream',
+      '--autoplay-policy=no-user-gesture-required',
       '--window-size=430,932',
       'about:blank',
     ], { stdio: 'ignore' });
@@ -698,6 +705,11 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   );
   check(limitGroup.active === '60000', `默认选中 1 分钟（active=${String(limitGroup.active)}）`);
   check(Number(limitGroup.overflow) <= 2, `首页时限选择组不横向溢出（overflow=${String(limitGroup.overflow)}px）`);
+  // v3.7：建房表单默认勾选「开启连麦（语音局）」
+  const voiceToggleDefault = await a.eval(
+    '(() => { const el = document.querySelector("#voice-toggle"); return !!el && el.checked === true; })()',
+  );
+  check(voiceToggleDefault === true, '首页「开启连麦」勾选框 #voice-toggle 默认勾选');
 
   log('\n[2] A 创建房间');
   await a.type('#nickname-input', '小明');
@@ -722,6 +734,43 @@ async function run(browser: Browser): Promise<{ a: Page; b: Page }> {
   await a.waitFor('document.body.innerText.includes("小红")', 8000, 'A 看到对手加入');
   check(true, 'A 端实时出现对手「小红」');
   await a.screenshot('03-room-both.png');
+
+  /* ---------- v3.7 语音连麦：fake mic 下应真正建立 P2P 连接 ---------- */
+  log('\n[3b] 语音连麦（v3.7，headless fake mic）');
+  await a.waitFor('!!document.querySelector("#voice-bar")', 8000, 'A 房间页出现语音条 #voice-bar');
+  await b.waitFor('!!document.querySelector("#voice-bar")', 8000, 'B 房间页出现语音条 #voice-bar');
+  const voiceStatusA0 = (await a.text('#voice-status')) || '';
+  check(/等对方开启语音|未开启语音/.test(voiceStatusA0), `A 初始语音状态为待开启（"${voiceStatusA0.trim()}"）`);
+  await a.click('#btn-voice');
+  await b.click('#btn-voice');
+  await a.waitFor(
+    '(() => { const el = document.querySelector("#voice-status"); return !!el && el.textContent.includes("语音已连接"); })()',
+    25000,
+    'A 端语音建立连接',
+  );
+  await b.waitFor(
+    '(() => { const el = document.querySelector("#voice-status"); return !!el && el.textContent.includes("语音已连接"); })()',
+    25000,
+    'B 端语音建立连接',
+  );
+  check(true, '两端各点「开启语音」后 WebRTC 连接建立（#voice-status=语音已连接）');
+  await a.screenshot('03b-voice-connected.png');
+  // 静音状态经 room:state 同步：A 静音 → B 的文案出现「对方已静音」
+  await b.waitFor('!!document.querySelector("#btn-voice-mute")', 8000, 'B 出现静音按钮 #btn-voice-mute');
+  await a.click('#btn-voice-mute');
+  await b.waitFor(
+    '(() => { const el = document.querySelector("#voice-status"); return !!el && el.textContent.includes("对方已静音"); })()',
+    10000,
+    'B 看到对方已静音',
+  );
+  check(true, '静音状态通过 room:state 同步到对方');
+  await a.click('#btn-voice-mute');
+  await b.waitFor(
+    '(() => { const el = document.querySelector("#voice-status"); return !!el && !el.textContent.includes("对方已静音"); })()',
+    10000,
+    'B 看到对方取消静音',
+  );
+  check(true, '取消静音同样同步到对方');
 
   log('\n[4] 双方准备 → 自动倒计时');
   await a.click('#btn-ready');

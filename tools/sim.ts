@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { io, type Socket } from 'socket.io-client';
 
 import GameModule, { constants, normalize, type Player, type Room } from '../src/server/game.js';
-import { loadEnvFile, parseEnvText } from '../src/server/env.js';
+import { loadEnvFile, parseEnvText, resolveIceServers } from '../src/server/env.js';
 import {
   ADMIN_AUTH_ERROR,
   ADMIN_NAMESPACE,
@@ -68,7 +68,11 @@ import type {
   SimpleOk,
   SubmitOk,
   SubmitPayload,
+  VoiceSignalOk,
+  VoiceSignalPayload,
+  VoiceStatePayload,
 } from '../src/shared/protocol.js';
+import { VOICE_SIGNAL_MAX_CHARS } from '../src/shared/protocol.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_PORT = 3299;
@@ -135,6 +139,8 @@ interface ClientPayloads {
   'round:next': EmptyPayload;
   'game:restart': EmptyPayload;
   'room:interact': InteractPayload;
+  'voice:state': VoiceStatePayload;
+  'voice:signal': VoiceSignalPayload;
   'game:end': EmptyPayload;
 }
 
@@ -149,6 +155,8 @@ interface AckResults {
   'round:next': ActionResult<SimpleOk>;
   'game:restart': ActionResult<RestartOk>;
   'room:interact': ActionResult<InteractOk>;
+  'voice:state': ActionResult<SimpleOk>;
+  'voice:signal': ActionResult<VoiceSignalOk>;
   'game:end': ActionResult<SimpleOk>;
 }
 
@@ -247,6 +255,12 @@ async function fetchJson(urlPath: string): Promise<HealthResult> {
 
 /* ==================== 子进程服务 ==================== */
 
+/** v3.7 语音 ICE 测试值：显式注入子进程，保证 /rtc-config 与启动日志断言确定 */
+const SIM_STUN_URLS = 'stun:sim-stun.test:3478, stun:sim-stun2.test:3478';
+const SIM_TURN_URL = 'turn:sim-turn.test:3478';
+const SIM_TURN_USERNAME = 'sim-turn-user';
+const SIM_TURN_CREDENTIAL = 'sim-turn-credential-must-not-be-logged';
+
 async function startServer(): Promise<StartedServer> {
   const proc = spawn(
     process.execPath,
@@ -254,7 +268,17 @@ async function startServer(): Promise<StartedServer> {
     {
       cwd: ROOT,
       // ADMIN_KEY 显式给测试值：进程环境变量优先于项目根 .env，服务器读到真实密钥也不会让本测试意外通过
-      env: { ...process.env, PORT: String(PORT), NODE_ENV: 'test', ADMIN_KEY: SIM_ADMIN_KEY },
+      // v3.7：STUN/TURN 也显式给测试值，验证「进程环境变量优先」与启动日志不泄露 credential
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        NODE_ENV: 'test',
+        ADMIN_KEY: SIM_ADMIN_KEY,
+        STUN_URLS: SIM_STUN_URLS,
+        TURN_URL: SIM_TURN_URL,
+        TURN_USERNAME: SIM_TURN_USERNAME,
+        TURN_CREDENTIAL: SIM_TURN_CREDENTIAL,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }
@@ -720,6 +744,9 @@ async function main(): Promise<void> {
   ok(normalize('Ａpple') === normalize('apple'), '全角半角不影响判定');
   ok(constants.COUNTDOWN_MS === 3000, 'COUNTDOWN_MS = 3000');
   ok(constants.INTERACT_COOLDOWN_MS === 1000, 'INTERACT_COOLDOWN_MS = 1000');
+  ok(constants.VOICE_SIGNAL_RATE_WINDOW_MS === 10000, 'VOICE_SIGNAL_RATE_WINDOW_MS = 10000（10 秒窗口）');
+  ok(constants.VOICE_SIGNAL_RATE_MAX === 120, 'VOICE_SIGNAL_RATE_MAX = 120（每窗口最多 120 条）');
+  ok(VOICE_SIGNAL_MAX_CHARS === 16384, 'VOICE_SIGNAL_MAX_CHARS = 16384');
   ok(constants.DEFAULT_SUBMIT_MS === 60000, 'DEFAULT_SUBMIT_MS = 60000');
   eq(constants.SUBMIT_LIMIT_OPTIONS, [0, 60000, 180000, 300000], 'SUBMIT_LIMIT_OPTIONS 仅 0/1/3/5 分钟');
   ok(!hasOwn(constants, 'SUBMIT_MS'), 'constants 不再导出 SUBMIT_MS');
@@ -757,8 +784,8 @@ async function main(): Promise<void> {
   eq(health0.headers['referrer-policy'], 'no-referrer', 'Referrer-Policy: no-referrer');
   eq(
     health0.headers['permissions-policy'],
-    'camera=(), microphone=(), geolocation=()',
-    'Permissions-Policy 关闭敏感设备权限'
+    'camera=(), microphone=(self), geolocation=()',
+    'Permissions-Policy：麦克风仅同源可用（v3.7 语音），相机 / 定位关闭'
   );
   ok(health0.headers['cache-control'] === 'no-store', '/health 仍不缓存（no-store）');
 
@@ -826,11 +853,21 @@ async function main(): Promise<void> {
       'settlePending',
       'submitLimitMs',
       'submitted',
+      'voice',
       'you',
     ],
     'PublicRoomState 字段与协议一致'
   );
   eq(stateA1.phase, 'lobby', '初始 phase = lobby');
+  eq(
+    stateA1.voice,
+    {
+      enabled: true,
+      you: { active: false, micMuted: false },
+      opponent: { active: false, micMuted: false },
+    },
+    'v3.7：默认建房开启语音（voiceEnabled 缺省 true），双方语音状态初始为 false'
+  );
   eq(stateA1.settlePending, false, '§10.10 新房 settlePending=false（准备页绝不能被结算锁定误伤）');
   eq(stateA1.round, 1, '初始 round = 1');
   eq(stateA1.basis, null, '首轮 basis = null');
@@ -2205,6 +2242,663 @@ async function main(): Promise<void> {
   eq((await fetchJson('/health')).body.rooms, 0, '结束本局用例结束后房间已删除');
   pass('未通关结束本局 game:end');
 
+  // ---------- 11f. v3.7 语音连麦：房间开关 / 状态同步 / 信令只转对手 / 断线复位 / rtc-config ----------
+  step('11f. 语音连麦：默认开启 / 关闭房间拒绝 / 状态同步 / 信令只转对手 / 断线复位 / /rtc-config');
+  const voiceA = await connectClient('voice-a');
+  const voiceB = await connectClient('voice-b');
+  const voiceCreate = asOk(await emitAck(voiceA, 'room:create', { name: '语音甲' }));
+  eq(voiceCreate.seat, 'a', '语音房建房者 seat=a');
+  const voiceCode = voiceCreate.code;
+  const voiceJoin = asOk(
+    await emitAck(voiceB, 'room:join', { code: voiceCode, name: '语音乙' })
+  );
+  eq(voiceJoin.seat, 'b', '语音房第二人 seat=b');
+  eq(
+    voiceJoin.state.voice,
+    {
+      enabled: true,
+      you: { active: false, micMuted: false },
+      opponent: { active: false, micMuted: false },
+    },
+    '默认建房 voice.enabled=true，双方 voice.active/voice.micMuted 初始 false'
+  );
+
+  // 空载荷 / 无实际变化：SimpleOk，且不额外广播 room:state
+  const markVoiceA = voiceA.mark();
+  const markVoiceB = voiceB.mark();
+  eq(
+    await emitAck(voiceA, 'voice:state', {}),
+    { ok: true },
+    'voice:state 空载荷（socket 只传 ack）-> SimpleOk'
+  );
+  await sleep(250);
+  eq(
+    voiceA.log.slice(markVoiceA).filter((entry) => entry.event === 'room:state').length,
+    0,
+    '无实际变化时 voice:state 不多广播 room:state'
+  );
+
+  // A 打开语音并静音：A 自己的 you、B 侧 opponent 都正确更新
+  eq(
+    await emitAck(voiceA, 'voice:state', { active: true, micMuted: true }),
+    { ok: true },
+    'A 上报 active=true / micMuted=true -> SimpleOk'
+  );
+  const voiceStateForA = await waitEvent(
+    voiceA,
+    'room:state',
+    (s) => s.voice.you.active === true && s.voice.you.micMuted === true,
+    { since: markVoiceA, timeout: 3000, hint: 'A 自己的 voice.you 更新' }
+  );
+  eq(
+    voiceStateForA.voice.you,
+    { active: true, micMuted: true },
+    'A 看到 voice.you = {active:true, micMuted:true}'
+  );
+  eq(
+    voiceStateForA.voice.opponent,
+    { active: false, micMuted: false },
+    'A 看到对方仍未开启语音'
+  );
+  const voiceStateForB = await waitEvent(
+    voiceB,
+    'room:state',
+    (s) => s.voice.opponent.active === true,
+    { since: markVoiceB, timeout: 3000, hint: 'B 侧 opponent 语音状态更新' }
+  );
+  eq(
+    voiceStateForB.voice.opponent,
+    { active: true, micMuted: true },
+    'B 看到 opponent = {active:true, micMuted:true}'
+  );
+  eq(
+    voiceStateForB.voice.you,
+    { active: false, micMuted: false },
+    'B 自己仍未开启语音'
+  );
+
+  // 只上报一个字段：另一个字段保持不变
+  eq(
+    await emitAck(voiceA, 'voice:state', { micMuted: false }),
+    { ok: true },
+    'A 只上报 micMuted=false'
+  );
+  const voicePartialB = await waitEvent(
+    voiceB,
+    'room:state',
+    (s) => s.voice.opponent.micMuted === false && s.voice.opponent.active === true,
+    { since: markVoiceB, timeout: 3000, hint: '部分更新后 active 保持 true / micMuted=false' }
+  );
+  eq(
+    voicePartialB.voice.opponent,
+    { active: true, micMuted: false },
+    '未出现的 active 字段保持不变'
+  );
+
+  // 重复上报同一状态 / 未知字段：SimpleOk 且不广播
+  const markNoopA = voiceA.mark();
+  const markNoopB = voiceB.mark();
+  eq(
+    await emitAck(voiceA, 'voice:state', { active: true, micMuted: false }),
+    { ok: true },
+    '重复上报同一状态 -> SimpleOk'
+  );
+  eq(
+    await emitAck(voiceA, 'voice:state', {
+      active: true,
+      micMuted: false,
+      hacked: 1,
+    } as unknown as VoiceStatePayload),
+    { ok: true },
+    '未知字段被忽略'
+  );
+  await sleep(300);
+  eq(
+    voiceA.log.slice(markNoopA).filter((entry) => entry.event === 'room:state').length,
+    0,
+    'A：无变化 / 未知字段不广播 room:state'
+  );
+  eq(
+    voiceB.log.slice(markNoopB).filter((entry) => entry.event === 'room:state').length,
+    0,
+    'B：无变化 / 未知字段不广播 room:state'
+  );
+
+  // 字段类型非法：INVALID_VOICE
+  eq(
+    asError(
+      await emitAck(voiceA, 'voice:state', { micMuted: 'yes' } as unknown as VoiceStatePayload)
+    ).error,
+    'INVALID_VOICE',
+    'micMuted 非布尔 -> INVALID_VOICE'
+  );
+  eq(
+    asError(
+      await emitAck(voiceA, 'voice:state', { active: 1 } as unknown as VoiceStatePayload)
+    ).error,
+    'INVALID_VOICE',
+    'active 非布尔 -> INVALID_VOICE'
+  );
+
+  // B 也打开语音（后面断线复位要用）
+  eq(
+    await emitAck(voiceB, 'voice:state', { active: true, micMuted: true }),
+    { ok: true },
+    'B 也打开语音'
+  );
+  await waitEvent(voiceA, 'room:state', (s) => s.voice.opponent.active === true, {
+    since: markVoiceA,
+    timeout: 3000,
+    hint: 'A 看到 B 开启语音',
+  });
+
+  // 信令：只转发给对手，载荷完全一致，发送者收不到
+  const offerData =
+    'v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0\r\n';
+  const markOfferA = voiceA.mark();
+  const markOfferB = voiceB.mark();
+  eq(
+    await emitAck(voiceA, 'voice:signal', { kind: 'offer', data: offerData }),
+    { ok: true, delivered: true },
+    'A 发 offer -> ack {ok:true, delivered:true}'
+  );
+  const offerSeenByB = await waitEvent(voiceB, 'voice:signal', (p) => p.kind === 'offer', {
+    since: markOfferB,
+    timeout: 3000,
+    hint: 'B 收到 A 的 offer',
+  });
+  eq(
+    offerSeenByB,
+    { kind: 'offer', data: offerData },
+    'B 收到的 voice:signal 载荷与 A 发出的完全一致'
+  );
+  eq(
+    voiceA.log.slice(markOfferA).filter((entry) => entry.event === 'voice:signal').length,
+    0,
+    '信令只发给对手，发送者收不到'
+  );
+
+  // answer 与空 candidate（data='' 合法）双向转发
+  const answerData = 'v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n';
+  const markAnswerA = voiceA.mark();
+  eq(
+    await emitAck(voiceB, 'voice:signal', { kind: 'answer', data: answerData }),
+    { ok: true, delivered: true },
+    'B 发 answer -> delivered:true'
+  );
+  eq(
+    await waitEvent(voiceA, 'voice:signal', (p) => p.kind === 'answer', {
+      since: markAnswerA,
+      timeout: 3000,
+      hint: 'A 收到 answer',
+    }),
+    { kind: 'answer', data: answerData },
+    'A 收到 answer，载荷一致'
+  );
+  const markIceB = voiceB.mark();
+  eq(
+    await emitAck(voiceA, 'voice:signal', { kind: 'ice', data: '' }),
+    { ok: true, delivered: true },
+    '空 candidate（data=""）也是合法信令'
+  );
+  eq(
+    await waitEvent(voiceB, 'voice:signal', (p) => p.kind === 'ice', {
+      since: markIceB,
+      timeout: 3000,
+      hint: 'B 收到空 candidate',
+    }),
+    { kind: 'ice', data: '' },
+    '空 candidate 原样转发'
+  );
+
+  // 非法信令：kind 白名单外 / 超长 data / 非字符串 data / 缺字段
+  const signalCountB = voiceB.log.filter((entry) => entry.event === 'voice:signal').length;
+  eq(
+    asError(
+      await emitAck(voiceA, 'voice:signal', {
+        kind: 'hack' as unknown as VoiceSignalPayload['kind'],
+        data: 'x',
+      })
+    ).error,
+    'INVALID_VOICE',
+    "kind='hack' -> INVALID_VOICE"
+  );
+  eq(
+    asError(
+      await emitAck(voiceA, 'voice:signal', {
+        kind: 'offer',
+        data: 'x'.repeat(VOICE_SIGNAL_MAX_CHARS + 1),
+      })
+    ).error,
+    'INVALID_VOICE',
+    '超长 data（> VOICE_SIGNAL_MAX_CHARS）-> INVALID_VOICE'
+  );
+  eq(
+    asError(
+      await emitAck(voiceA, 'voice:signal', {
+        kind: 'offer',
+        data: 123,
+      } as unknown as VoiceSignalPayload)
+    ).error,
+    'INVALID_VOICE',
+    '非字符串 data -> INVALID_VOICE'
+  );
+  eq(
+    asError(await emitAck(voiceA, 'voice:signal', {} as unknown as VoiceSignalPayload)).error,
+    'INVALID_VOICE',
+    '缺 kind/data -> INVALID_VOICE'
+  );
+  await sleep(150);
+  eq(
+    voiceB.log.filter((entry) => entry.event === 'voice:signal').length,
+    signalCountB,
+    '非法信令一条都不转发'
+  );
+
+  // 对手离线：delivered=false（不是错误）
+  voiceB.disconnect();
+  await waitEvent(
+    voiceA,
+    'room:state',
+    (s) => {
+      const b = s.players.find((p) => p.seat === 'b');
+      return b !== undefined && b.connected === false;
+    },
+    { since: markVoiceA, timeout: 3000, hint: 'A 看到 B 离线' }
+  );
+  eq(
+    await emitAck(voiceA, 'voice:signal', { kind: 'offer', data: offerData }),
+    { ok: true, delivered: false },
+    '对手离线时 voice:signal -> delivered:false'
+  );
+
+  // 断线重连：语音公开状态复位（B 侧复位，A 仍在线所以保持 active）
+  const voiceB2 = await connectClient('voice-b2');
+  const markRejoinA = voiceA.mark();
+  const voiceRejoinB = asOk(
+    await emitAck(voiceB2, 'room:join', { code: voiceCode, name: '语音乙', token: voiceJoin.token })
+  );
+  eq(
+    voiceRejoinB.state.voice.you,
+    { active: false, micMuted: false },
+    'B 断线重连后自己的 voiceActive / voiceMicMuted 复位为 false'
+  );
+  eq(
+    voiceRejoinB.state.voice.opponent,
+    { active: true, micMuted: false },
+    'B 重连后仍能看到 A 的真实语音状态'
+  );
+  await waitEvent(voiceA, 'room:state', (s) => s.voice.opponent.active === false, {
+    since: markRejoinA,
+    timeout: 3000,
+    hint: 'A 看到 B 重连后语音复位',
+  });
+
+  const voiceA2 = await connectClient('voice-a2');
+  const markRejoinB = voiceB2.mark();
+  const voiceRejoinA = asOk(
+    await emitAck(voiceA2, 'room:join', {
+      code: voiceCode,
+      name: '语音甲',
+      token: voiceCreate.token,
+    })
+  );
+  eq(
+    voiceRejoinA.state.voice.you,
+    { active: false, micMuted: false },
+    'A 断线重连后自己的语音状态也复位为 false'
+  );
+  eq(
+    voiceRejoinA.state.voice.opponent,
+    { active: false, micMuted: false },
+    'A 重连后看到双方 voiceActive 均为 false'
+  );
+  await waitEvent(voiceB2, 'room:state', (s) => s.voice.opponent.active === false, {
+    since: markRejoinB,
+    timeout: 3000,
+    hint: 'B 看到 A 重连后语音复位',
+  });
+
+  // 关闭语音的房间：建房成功，但语音事件一律 VOICE_DISABLED
+  const voiceOffCreate = asOk(
+    await emitAck(voiceA2, 'room:create', { name: '静音房主', voiceEnabled: false })
+  );
+  const voiceOffJoin = asOk(
+    await emitAck(voiceB2, 'room:join', { code: voiceOffCreate.code, name: '静音房客' })
+  );
+  eq(voiceOffJoin.state.voice.enabled, false, 'voiceEnabled=false 的房间 state.voice.enabled=false');
+  eq(
+    asError(await emitAck(voiceA2, 'voice:state', { active: true })).error,
+    'VOICE_DISABLED',
+    '未开语音的房间 voice:state -> VOICE_DISABLED'
+  );
+  eq(
+    asError(await emitAck(voiceB2, 'voice:state', { micMuted: true })).error,
+    'VOICE_DISABLED',
+    '未开语音的房间 voice:state（B 侧）-> VOICE_DISABLED'
+  );
+  eq(
+    asError(await emitAck(voiceA2, 'voice:signal', { kind: 'offer', data: 'x' })).error,
+    'VOICE_DISABLED',
+    '未开语音的房间 voice:signal -> VOICE_DISABLED'
+  );
+  eq(
+    asError(await emitAck(voiceB2, 'voice:signal', { kind: 'ice', data: '' })).error,
+    'VOICE_DISABLED',
+    '未开语音的房间 voice:signal（B 侧）-> VOICE_DISABLED'
+  );
+  eq((await emitAck(voiceA2, 'room:leave', {})).ok, true, '关闭语音房 A 离开');
+  eq((await emitAck(voiceB2, 'room:leave', {})).ok, true, '关闭语音房 B 离开');
+  await sleep(200);
+
+  // voiceEnabled 非布尔：INVALID_VOICE 且不建房
+  const roomsBeforeBadVoice = (await fetchJson('/health')).body.rooms;
+  const badVoiceType = asError(
+    await emitAck(voiceB2, 'room:create', {
+      name: '非法语音',
+      voiceEnabled: 'yes' as unknown as boolean,
+    })
+  );
+  eq(badVoiceType.error, 'INVALID_VOICE', "voiceEnabled:'yes' -> INVALID_VOICE");
+  eq(badVoiceType.message, '语音参数无效', 'INVALID_VOICE 中文文案与协议一致');
+  eq((await fetchJson('/health')).body.rooms, roomsBeforeBadVoice, '非法 voiceEnabled 不建房');
+  eq((await fetchJson('/health')).body.rooms, 0, '语音用例结束后房间已全部删除');
+
+  // /rtc-config：公开 ICE 配置，no-store
+  const rtcRes = await request('/rtc-config');
+  eq(rtcRes.status, 200, 'GET /rtc-config -> 200');
+  eq(rtcRes.headers['cache-control'], 'no-store', '/rtc-config 不缓存（Cache-Control: no-store）');
+  eq(
+    rtcRes.headers['permissions-policy'],
+    'camera=(), microphone=(self), geolocation=()',
+    '/rtc-config 同样带 v3.7 安全头（mic 同源放行）'
+  );
+  const rtcBody = JSON.parse(rtcRes.body) as {
+    iceServers: { urls: string[]; username?: string; credential?: string }[];
+  };
+  ok(Array.isArray(rtcBody.iceServers), '/rtc-config 返回 iceServers 数组');
+  eq(
+    rtcBody.iceServers,
+    [
+      { urls: ['stun:sim-stun.test:3478', 'stun:sim-stun2.test:3478'] },
+      {
+        urls: ['turn:sim-turn.test:3478'],
+        username: SIM_TURN_USERNAME,
+        credential: SIM_TURN_CREDENTIAL,
+      },
+    ],
+    '/rtc-config 与进程环境变量一致（STUN 逗号分隔 + TURN 一条，形状兼容 RTCIceServer）'
+  );
+  for (const server of rtcBody.iceServers) {
+    ok(Array.isArray(server.urls) && server.urls.length > 0, '每条 ICE 服务器的 urls 是非空数组');
+  }
+  // 启动日志：只打印数量，绝不打印 TURN credential
+  ok(
+    started.logs.out.includes('[同声传意] 已配置 2 个 ICE 服务器'),
+    '启动日志打印「已配置 N 个 ICE 服务器」'
+  );
+  ok(
+    !started.logs.out.includes(SIM_TURN_CREDENTIAL) &&
+      !started.logs.err.includes(SIM_TURN_CREDENTIAL),
+    '启动日志（stdout/stderr）绝不打印 TURN credential'
+  );
+  pass('语音连麦信令与房间开关');
+
+  // ---------- 11g. v3.7 语音内部规则（直接驱动 Game，覆盖限流与开关持久化） ----------
+  step('11g. voice 内部规则：开关校验 / 座位视角 / 无变化不广播 / 只转对手 + 10s/120 条限流 / restart 保持');
+  const gVoice = new GameModule();
+  const gVoicePlayerEvents: { seat: Seat; event: string; payload: unknown }[] = [];
+  const gvCreated = asOk(gVoice.createRoom('gv-a', { name: '甲' }));
+  gVoice.joinRoom('gv-b', { code: gvCreated.code, name: '乙' });
+  const gvRoom = gVoice.rooms.get(gvCreated.code) as Room;
+  gVoice.emitToPlayer = (
+    player: Player,
+    event: keyof ServerToClientEvents,
+    payload: unknown
+  ): void => {
+    gVoicePlayerEvents.push({ seat: player.seat, event, payload });
+  };
+  const gvPlayer = (seat: Seat): Player => {
+    const found = gvRoom.players.find((p) => p.seat === seat);
+    if (!found) throw new Error(`断言失败：缺少座位 ${seat}`);
+    return found;
+  };
+
+  eq(gvRoom.voiceEnabled, true, 'createRoom 缺省 voiceEnabled=true');
+  eq(
+    gvRoom.players.map((p) => p.voiceActive),
+    [false, false],
+    'createRoom / joinRoom：voiceActive 初值 false'
+  );
+  eq(
+    gvRoom.players.map((p) => p.voiceMicMuted),
+    [false, false],
+    'createRoom / joinRoom：voiceMicMuted 初值 false'
+  );
+  eq(
+    gvRoom.players.map((p) => p.voiceSignalCount),
+    [0, 0],
+    'createRoom / joinRoom：信令限流计数初值 0'
+  );
+
+  const gvRoomsBefore = gVoice.rooms.size;
+  const gvBadVoice = asError(
+    gVoice.createRoom('gv-bad', { name: '丙', voiceEnabled: 'yes' as unknown as boolean })
+  );
+  eq(gvBadVoice.error, 'INVALID_VOICE', "voiceEnabled:'yes' -> INVALID_VOICE");
+  eq(gvBadVoice.message, '语音参数无效', 'INVALID_VOICE 中文文案与协议一致');
+  eq(gVoice.rooms.size, gvRoomsBefore, '非法 voiceEnabled 不建房');
+  const gvNull = asOk(
+    gVoice.createRoom('gv-null', { name: '丁', voiceEnabled: null as unknown as boolean })
+  );
+  eq(
+    (gVoice.rooms.get(gvNull.code) as Room).voiceEnabled,
+    true,
+    'voiceEnabled=null 按缺省处理 -> true'
+  );
+  const gvOffCreated = asOk(gVoice.createRoom('gv-off', { name: '戊', voiceEnabled: false }));
+  const gvOffRoom = gVoice.rooms.get(gvOffCreated.code) as Room;
+  eq(gvOffRoom.voiceEnabled, false, 'voiceEnabled=false 生效');
+
+  // 未开语音 / 不在房间
+  eq(
+    asError(gVoice.setVoiceState('gv-off', { active: true })).error,
+    'VOICE_DISABLED',
+    '未开语音房间 setVoiceState -> VOICE_DISABLED'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('gv-off', { kind: 'offer', data: 'x' })).error,
+    'VOICE_DISABLED',
+    '未开语音房间 relayVoiceSignal -> VOICE_DISABLED'
+  );
+  eq(
+    asError(gVoice.setVoiceState('ghost', { active: true })).error,
+    'NOT_IN_ROOM',
+    '不在房间 setVoiceState -> NOT_IN_ROOM'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('ghost', { kind: 'offer', data: 'x' })).error,
+    'NOT_IN_ROOM',
+    '不在房间 relayVoiceSignal -> NOT_IN_ROOM'
+  );
+
+  // getState 座位视角映射
+  const gvViewA = gVoice.getState(gvRoom, gvPlayer('a'));
+  const gvViewB = gVoice.getState(gvRoom, gvPlayer('b'));
+  eq(
+    gvViewA.voice,
+    {
+      enabled: true,
+      you: { active: false, micMuted: false },
+      opponent: { active: false, micMuted: false },
+    },
+    'A 视角 voice.enabled=true / 双方初始 false'
+  );
+  eq(gvViewB.voice, gvViewA.voice, 'B 视角与 A 视角字段一致（不需要前端新分支）');
+  eq(asError(gVoice.setVoiceState('gv-a', null)).error, 'INVALID_VOICE', 'null 载荷 -> INVALID_VOICE');
+  eq(
+    asError(gVoice.setVoiceState('gv-a', { active: 'yes' })).error,
+    'INVALID_VOICE',
+    '非布尔 active -> INVALID_VOICE'
+  );
+  eq(
+    asError(gVoice.setVoiceState('gv-a', { micMuted: 1 })).error,
+    'INVALID_VOICE',
+    '非布尔 micMuted -> INVALID_VOICE'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('gv-a', { kind: 'hack', data: 'x' })).error,
+    'INVALID_VOICE',
+    '信令 kind 不在白名单 -> INVALID_VOICE'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('gv-a', { kind: 'offer', data: 123 })).error,
+    'INVALID_VOICE',
+    '信令 data 非字符串 -> INVALID_VOICE'
+  );
+  eq(
+    asError(
+      gVoice.relayVoiceSignal('gv-a', {
+        kind: 'offer',
+        data: 'x'.repeat(VOICE_SIGNAL_MAX_CHARS + 1),
+      })
+    ).error,
+    'INVALID_VOICE',
+    '信令 data 超长 -> INVALID_VOICE'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('gv-a', { kind: 'offer' })).error,
+    'INVALID_VOICE',
+    '信令缺 data -> INVALID_VOICE'
+  );
+  eq(
+    asError(gVoice.relayVoiceSignal('gv-a', null)).error,
+    'INVALID_VOICE',
+    '信令 null 载荷 -> INVALID_VOICE'
+  );
+
+  // 无变化不广播、未知字段忽略
+  const gvEmitBefore = gVoicePlayerEvents.length;
+  eq(gVoice.setVoiceState('gv-a', {}), { ok: true }, '空载荷 -> SimpleOk');
+  eq(
+    gVoice.setVoiceState('gv-a', { active: false, micMuted: false, injected: 1 }),
+    { ok: true },
+    '未知字段忽略、无变化 -> SimpleOk'
+  );
+  eq(gVoicePlayerEvents.length, gvEmitBefore, '无实际变化时不多广播 room:state');
+  eq(gVoice.setVoiceState('gv-a', { active: true }), { ok: true }, '有变化 -> SimpleOk');
+  eq(gvPlayer('a').voiceActive, true, 'active=true 已写入');
+  eq(gvPlayer('a').voiceMicMuted, false, '未出现的 micMuted 保持不变');
+  eq(
+    gVoicePlayerEvents.length,
+    gvEmitBefore + 2,
+    '有变化时只广播一轮（两名玩家各一次 room:state）'
+  );
+  eq(
+    gVoicePlayerEvents
+      .slice(-2)
+      .map((entry) => entry.seat)
+      .sort(),
+    ['a', 'b'],
+    '广播覆盖双方座位'
+  );
+
+  // 信令只转给对手、载荷原样（服务端不解析）
+  eq(
+    gVoice.relayVoiceSignal('gv-a', { kind: 'offer', data: 'SDP-原样' }),
+    { ok: true, delivered: true },
+    '合法信令 -> delivered:true'
+  );
+  eq(
+    gVoicePlayerEvents.at(-1),
+    { seat: 'b', event: 'voice:signal', payload: { kind: 'offer', data: 'SDP-原样' } },
+    '信令只发给对手，载荷原样'
+  );
+  eq(
+    gVoicePlayerEvents.filter((entry) => entry.event === 'voice:signal' && entry.seat === 'a')
+      .length,
+    0,
+    '发送者收不到自己的信令'
+  );
+
+  // 限流：10 秒窗口最多 120 条，超出静默丢弃（delivered:false，不报错）
+  const gvA = gvPlayer('a');
+  gvA.voiceSignalCount = 0;
+  gvA.voiceSignalResetAt = 0;
+  let gvDelivered = 0;
+  let gvDropped = 0;
+  for (let i = 0; i < constants.VOICE_SIGNAL_RATE_MAX + 1; i += 1) {
+    const res = gVoice.relayVoiceSignal('gv-a', { kind: 'ice', data: 'c' });
+    if (res.ok && res.delivered) gvDelivered += 1;
+    else gvDropped += 1;
+  }
+  eq(gvDelivered, constants.VOICE_SIGNAL_RATE_MAX, '窗口内前 120 条正常转发');
+  eq(gvDropped, 1, '第 121 条静默丢弃（delivered:false，不报错）');
+  eq(
+    gvA.voiceSignalCount,
+    constants.VOICE_SIGNAL_RATE_MAX + 1,
+    '超限请求也计入窗口（下一个窗口重置）'
+  );
+  gvA.voiceSignalResetAt = Date.now() - 1; // 窗口已过期
+  eq(
+    gVoice.relayVoiceSignal('gv-a', { kind: 'ice', data: '' }),
+    { ok: true, delivered: true },
+    '窗口过期后重新计数并恢复转发'
+  );
+  eq(gvA.voiceSignalCount, 1, '新窗口计数从 1 开始');
+
+  // 语音事件不创建计时器、不改变相位（单 timer 纪律）
+  eq(gvRoom.phase, 'lobby', '语音事件不改变房间相位');
+  eq(gvRoom.timer, null, '语音事件不创建任何计时器');
+
+  // 对方离线：delivered=false，不转发
+  eq(
+    gVoice.setVoiceState('gv-b', { active: true, micMuted: true }),
+    { ok: true },
+    'B 打开语音'
+  );
+  gVoice.disconnect('gv-b');
+  eq(gvPlayer('b').voiceActive, false, 'disconnect 复位该玩家 voiceActive');
+  eq(gvPlayer('b').voiceMicMuted, false, 'disconnect 复位该玩家 voiceMicMuted');
+  const gvSignalCountBeforeOffline = gVoicePlayerEvents.filter(
+    (entry) => entry.event === 'voice:signal'
+  ).length;
+  eq(
+    gVoice.relayVoiceSignal('gv-a', { kind: 'offer', data: 'x' }),
+    { ok: true, delivered: false },
+    '对方离线 -> delivered:false'
+  );
+  eq(
+    gVoicePlayerEvents.filter((entry) => entry.event === 'voice:signal').length,
+    gvSignalCountBeforeOffline,
+    '对方离线时不转发任何信令'
+  );
+
+  // token 重连：语音公开状态复位（即使内部有脏值）
+  const gvBToken = gvPlayer('b').token;
+  gvPlayer('b').voiceActive = true;
+  gvPlayer('b').voiceMicMuted = true;
+  eq(
+    asOk(gVoice.joinRoom('gv-b2', { code: gvRoom.code, token: gvBToken })).seat,
+    'b',
+    'token 重连恢复座位 b'
+  );
+  eq(gvPlayer('b').voiceActive, false, 'token 重连后 voiceActive 复位为 false');
+  eq(gvPlayer('b').voiceMicMuted, false, 'token 重连后 voiceMicMuted 复位为 false');
+
+  // 房间级 voiceEnabled 在 restart / 换轮 / countdown 中保持
+  gVoice.joinRoom('gv-off-b', { code: gvOffRoom.code, name: '己' });
+  gvOffRoom.phase = 'won';
+  eq(asOk(gVoice.restart('gv-off')).watching, true, '关闭语音房 restart 成功（对方仍留守）');
+  eq(gvOffRoom.voiceEnabled, false, 'restart 不重置房间级 voiceEnabled');
+  gvOffRoom.phase = 'reveal';
+  gVoice._advanceRound(gvOffRoom);
+  eq(gvOffRoom.voiceEnabled, false, '_advanceRound 不重置 voiceEnabled');
+  gVoice._startCountdown(gvOffRoom);
+  eq(gvOffRoom.voiceEnabled, false, '_startCountdown 不重置 voiceEnabled');
+  gVoice.shutdown();
+  pass('voice 内部规则');
+
   // ---------- 12. 超时自动提交（直接驱动状态机，不等待真实 60s） ----------
   step('12. 超时自动填「词穷」并正常判定');
   const gTimeout = new GameModule();
@@ -3267,6 +3961,7 @@ async function main(): Promise<void> {
     '在线玩家 offlineAt=null'
   );
   eq(admSummary.submitLimitMs, 60000, '列表行 submitLimitMs=60000（默认）');
+  eq(admSummary.voice, true, 'v3.7：列表行 voice=true（默认建房开启语音）');
   eq(admSummary.deadline, null, 'lobby 阶段 deadline=null');
   eq(admSummary.settlePending, false, 'lobby 且无结算快照：settlePending=false');
   ok(Number.isFinite(admSummary.createdAt) && admSummary.createdAt > 0, 'createdAt 是毫秒时间戳');
@@ -3335,6 +4030,7 @@ async function main(): Promise<void> {
   eq(admWatchRes.detail.history, [], 'lobby 快照 history=[]');
   eq(admWatchRes.detail.settleEndedAt, null, 'lobby 快照 settleEndedAt=null');
   eq(admWatchRes.detail.deadline, null, 'lobby 快照 deadline=null');
+  eq(admWatchRes.detail.voice, true, 'v3.7：观战详情也含 voice 字段（房间级开关）');
   ok(!payloadMentions(admWatchRes.detail, 'token'), '观战快照 JSON 不含 token 字段');
   ok(
     !payloadMentions(admWatchRes.detail, admWatchCreate.token),
@@ -3600,6 +4296,44 @@ async function main(): Promise<void> {
     else delete process.env[admEnvNewKey];
   }
   ok(!hasOwn(process.env, admEnvNewKey), '测试后已清理临时写入的 process.env 键');
+
+  // v3.7：ICE 配置解析（纯函数，显式传 env 避免受 .env / 宿主环境影响）
+  eq(
+    resolveIceServers({}),
+    [{ urls: ['stun:stun.miwifi.com:3478', 'stun:stun.chat.bilibili.com:3478'] }],
+    'STUN_URLS 未配置 -> 默认两条国内 STUN'
+  );
+  eq(resolveIceServers({ STUN_URLS: '' }), [], 'STUN_URLS 留空 = 不用 STUN');
+  eq(
+    resolveIceServers({ STUN_URLS: ' stun:a:1 , stun:b:1 , stun:a:1 ' }),
+    [{ urls: ['stun:a:1', 'stun:b:1'] }],
+    'STUN_URLS 逗号分隔：去空白 / 去重 / 保持顺序'
+  );
+  eq(
+    resolveIceServers({ STUN_URLS: 'stun:a:1', TURN_URL: '', TURN_USERNAME: 'u' }),
+    [{ urls: ['stun:a:1'] }],
+    'TURN_URL 为空时不追加 turn 服务器'
+  );
+  eq(
+    resolveIceServers({
+      STUN_URLS: 'stun:a:1',
+      TURN_URL: 'turn:t:1',
+      TURN_USERNAME: '',
+      TURN_CREDENTIAL: '',
+    }),
+    [{ urls: ['stun:a:1'] }, { urls: ['turn:t:1'] }],
+    'TURN_URL 非空才追加一条；空用户名 / 凭据不带'
+  );
+  eq(
+    resolveIceServers({
+      STUN_URLS: '',
+      TURN_URL: 'turn:t:1',
+      TURN_USERNAME: 'u',
+      TURN_CREDENTIAL: 'c',
+    }),
+    [{ urls: ['turn:t:1'], username: 'u', credential: 'c' }],
+    '只用 TURN 时也正常（urls 恒为数组，凭据原样下发）'
+  );
   pass('env.ts 解析与加载');
 
   // ---------- 28. 管理后台限流（必须放在 admin 测试段最后） ----------

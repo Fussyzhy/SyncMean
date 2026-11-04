@@ -2,8 +2,8 @@
 /**
  * 应用根组件：
  * - 四个视图常驻 DOM（与旧 index.html 一致），按 state.phase 派发 view--active；
- * - 全局层：#btn-sound / #btn-theme / #net-banner / #countdown-overlay / #confetti /
- *   #interact-fx（v3.6 互动特效）/ #toast；
+ * - 全局层：#btn-sound / #btn-theme / #net-banner / #voice-bar（v3.7 语音连麦）/
+ *   #countdown-overlay / #confetti / #interact-fx（v3.6 互动特效）/ #toast；
  * - 启动旧 init() 的等价物 + 100ms 主循环（倒计时数字与提交进度条）。
  */
 import { onBeforeUnmount, watch } from 'vue';
@@ -16,6 +16,7 @@ import ConfettiLayer from '@/components/ConfettiLayer.vue';
 import InteractionFx from '@/components/InteractionFx.vue';
 import ToastHost from '@/components/ToastHost.vue';
 import NetBanner from '@/components/NetBanner.vue';
+import VoiceBar from '@/components/VoiceBar.vue';
 import SoundToggle from '@/components/SoundToggle.vue';
 import ThemeToggle from '@/components/ThemeToggle.vue';
 import { useGameSession } from '@/composables/useGameSession';
@@ -63,6 +64,7 @@ onBeforeUnmount(() => {
   <SoundToggle />
   <ThemeToggle />
   <NetBanner />
+  <VoiceBar />
 
   <main class="app">
     <HomeView :active="game.view === 'home'" />

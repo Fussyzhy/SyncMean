@@ -1,5 +1,5 @@
 /**
- * 同声传意 —— 环境变量加载（v3.5，PROTOCOL.md §14.1）
+ * 同声传意 —— 环境变量加载（v3.5，PROTOCOL.md §14.1；v3.7 增加语音 ICE 配置）
  *
  * 只做一件很窄的事：把项目根目录 `.env` 读进 `process.env`，然后导出后端要用的配置。
  * - **进程环境变量优先**：已经存在的键（含显式空串 `ADMIN_KEY=`）一律不被 `.env` 覆盖，
@@ -134,3 +134,63 @@ export const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
 
 /** 管理后台是否启用（唯一判据：ADMIN_KEY 非空） */
 export const ADMIN_ENABLED = ADMIN_KEY.length > 0;
+
+/* ==================== v3.7：语音连麦的 ICE 配置 ==================== */
+
+/**
+ * 单条 ICE 服务器配置：形状与浏览器 `RTCIceServer` 兼容（`urls` 恒为数组）。
+ * 注意：TURN 的 `username` / `credential` 对玩家可见（TURN 机制决定），
+ * 但**绝不打印到日志**，也不写入任何房间 / 信令数据。
+ */
+export interface RtcIceServerConfig {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
+/** 默认 STUN：国内可达性优先；两个都不可用时浏览器仍可用本机候选做局域网直连 */
+const DEFAULT_STUN_URLS: readonly string[] = [
+  'stun:stun.miwifi.com:3478',
+  'stun:stun.chat.bilibili.com:3478',
+];
+
+/** 逗号分隔的 URL 列表 → 去空白、去空项、去重（保持原顺序） */
+export function splitUrlList(raw: string): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const part of raw.split(',')) {
+    const url = part.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    result.push(url);
+  }
+  return result;
+}
+
+/**
+ * 解析 v3.7 语音 ICE 配置（纯函数，便于单测）：读取 `STUN_URLS` + 可选 TURN 三件套。
+ * - `STUN_URLS` **未配置** → 用默认两条国内 STUN；配置为空串 → 不用 STUN；
+ * - `TURN_URL` 非空才追加**一条** turn 服务器（可含逗号分隔的多个地址）；
+ * - 用户名 / 凭据只在非空时带上（匿名 TURN 不需要）。
+ */
+export function resolveIceServers(env: NodeJS.ProcessEnv = process.env): RtcIceServerConfig[] {
+  const stunRaw = env.STUN_URLS;
+  const stunUrls = stunRaw === undefined ? DEFAULT_STUN_URLS.slice() : splitUrlList(stunRaw);
+
+  const turnUrl = (env.TURN_URL || '').trim();
+  const turnUsername = (env.TURN_USERNAME || '').trim();
+  const turnCredential = (env.TURN_CREDENTIAL || '').trim();
+
+  const iceServers: RtcIceServerConfig[] = [];
+  if (stunUrls.length > 0) iceServers.push({ urls: stunUrls });
+  if (turnUrl) {
+    const turn: RtcIceServerConfig = { urls: splitUrlList(turnUrl) };
+    if (turnUsername) turn.username = turnUsername;
+    if (turnCredential) turn.credential = turnCredential;
+    iceServers.push(turn);
+  }
+  return iceServers;
+}
+
+/** 下发给客户端的 ICE 服务器列表（GET /rtc-config；只有地址 / 可选 TURN 凭据，无任何密钥） */
+export const RTC_ICE_SERVERS: RtcIceServerConfig[] = resolveIceServers();

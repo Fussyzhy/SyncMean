@@ -1,0 +1,183 @@
+// =============================================================================
+// v3.7 语音连麦：全局语音条（#voice-bar）+ 首页「开启连麦」勾选（#voice-toggle）
+//
+// 颜色全部走主题令牌（--fab-bg / --line / --text / --muted / --dim / --cyan / --warn），
+// 深浅两套主题自动可读；尺寸按 375px 手机宽度收敛，窄屏只缩 gap / 字号，不换行溢出。
+// 固定 DOM id 见 PROTOCOL.md §9，样式只挂在 id / BEM class 上，不参与逻辑。
+// =============================================================================
+
+@use 'variables' as *;
+@use 'mixins' as *;
+
+// ---- 全局语音条：与右上角音效/主题开关同一水平带，固定在左上角 ----
+.voice {
+  position: fixed;
+  top: max(10px, env(safe-area-inset-top, 0px));
+  left: max(16px, calc(50% - 296px));
+  z-index: 72;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100vw - 32px);
+  padding: 5px 7px;
+  border-radius: $radius-pill;
+  border: 1px solid var(--line);
+  background: var(--fab-bg);
+  color: var(--text);
+  box-shadow: var(--shadow-toast);
+  @include frosted(10px);
+
+  // 状态文案：固定措辞由 JS 给出，这里只按状态换色
+  &__status {
+    padding: 0 4px;
+    font-size: 11.5px;
+    font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: 0.02em;
+    color: var(--muted);
+    white-space: nowrap;
+
+    &--connected {
+      color: var(--cyan);
+    }
+
+    &--failed {
+      color: var(--warn);
+    }
+  }
+
+  // 条内按钮：在 .btn 基座上压扁成胶囊（特异性 .voice .btn > .btn）
+  .btn {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: $radius-pill;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+
+  // 静音态：用警示色提示「你正在静音」
+  .btn--ghost.is-muted {
+    color: var(--warn);
+    border-color: var(--line-strong);
+  }
+
+  .btn--plain {
+    min-height: 36px;
+    padding: 0 10px;
+    font-size: 12px;
+    color: var(--cyan);
+  }
+
+  // 远端音轨容器：隐藏但仍可播放
+  &__audio {
+    display: none;
+  }
+}
+
+// ---- 首页建房表单的「开启连麦（语音局）」勾选 ----
+.voice-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  &__row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 2px 0;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  &__input {
+    flex: 0 0 auto;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: var(--fill-cyan);
+
+    &:focus-visible {
+      @include focus-ring();
+    }
+  }
+
+  &__text {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text);
+  }
+
+  // 勾选下方的双盲提示：与文字左对齐（20px 方框 + 10px 间距）
+  &__hint {
+    margin: 0;
+    padding-left: 30px;
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--dim);
+  }
+}
+
+// ---- 手机 / 窄屏（< 平板断点）----
+// 右上角还有 #btn-sound / #btn-theme 两个 44px 悬浮按钮（右边界 max(16px, ...) / max(68px, ...)）：
+// 语音条必须让出右侧 112px 区域，否则会压住它们。空间不够时允许状态文案换行，
+// 但按钮不换行；高度仍控制在顶部预留带以内。
+@media (max-width: 599px) {
+  // 状态文案较长时（如「语音已连接（对方已静音）」）语音条会折成两行，
+  // 此时按实测高度给 .app 下推顶部留白，保证首屏内容不被压住；
+  // 单行（44px）时 max() 取回原有 64px，布局完全不变。桌面端不生效。
+  body.is-voice-bar .app {
+    padding-top: max(64px, calc(var(--voice-bar-h, 44px) + 18px));
+  }
+
+  .voice {
+    left: 16px;
+    gap: 5px;
+    padding: 4px 6px;
+    max-width: calc(100vw - 136px);
+
+    &__status {
+      flex: 0 1 auto;
+      min-width: 4.5em;
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .btn {
+      min-height: 34px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+
+    .btn--plain {
+      min-height: 34px;
+      padding: 0 8px;
+      font-size: 11.5px;
+    }
+  }
+}
+
+// ---- 超窄手机（≤359px，与 _responsive.scss 同一断点）：再收一档 ----
+@media (max-width: $bp-mobile-s) {
+  body.is-voice-bar .app {
+    padding-top: max(60px, calc(var(--voice-bar-h, 44px) + 18px));
+  }
+
+  .voice {
+    left: 12px;
+    gap: 4px;
+    padding: 4px 5px;
+    max-width: calc(100vw - 128px);
+
+    .btn {
+      padding: 0 9px;
+      font-size: 11.5px;
+    }
+  }
+}

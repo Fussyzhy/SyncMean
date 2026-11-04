@@ -196,6 +196,8 @@ function createGameSession() {
   const submittedAt = ref(0);
   /** 创建房间时房主选定的填词时限（仅建房生效；进房后以 state.submitLimitMs 为准） */
   const submitLimitMs = ref<SubmitLimitMs>(DEFAULT_SUBMIT_MS);
+  /** v3.7：建房时是否开启语音连麦（房间级参数，默认开；进房后以 state.voice.enabled 为准） */
+  const voiceEnabled = ref(true);
   const agreeAck = ref<AgreeAck | null>(null);
   const settleAt = ref(0);
   const openRound = ref(0);
@@ -745,7 +747,12 @@ function createGameSession() {
     pendingCreate.value = true;
     socketApi.emitAck(
       'room:create',
-      { name, token: token.value, submitLimitMs: submitLimitMs.value },
+      {
+        name,
+        token: token.value,
+        submitLimitMs: submitLimitMs.value,
+        voiceEnabled: voiceEnabled.value,
+      },
       (res) => {
         pendingCreate.value = false;
         if (!res.ok) {
@@ -1295,6 +1302,7 @@ function createGameSession() {
     submitLimitOptions,
     submitLimitText,
     roomSubmitLimitMs,
+    voiceEnabled,
     // 派生：对局
     opened,
     submittedYou,

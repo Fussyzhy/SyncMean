@@ -14,7 +14,7 @@ import { Server } from 'socket.io';
 
 import Game, { ERROR_MESSAGES } from './game.js';
 import { attachAdmin } from './admin.js';
-import { ADMIN_ENABLED, PORT } from './env.js';
+import { ADMIN_ENABLED, PORT, RTC_ICE_SERVERS } from './env.js';
 import type {
   ActionError,
   ActionResult,
@@ -36,6 +36,9 @@ import type {
   SocketData,
   SubmitOk,
   SubmitPayload,
+  VoiceSignalOk,
+  VoiceSignalPayload,
+  VoiceStatePayload,
 } from '../shared/protocol.js';
 import type { GameTransport } from './game.js';
 
@@ -118,7 +121,8 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'no-referrer',
-  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  // v3.7：语音连麦需要同源页面使用麦克风；camera / geolocation 仍完全关闭
+  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
 };
 
 app.use((req, res, next) => {
@@ -129,6 +133,16 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({ ok: true, rooms: game.roomCount() });
+});
+
+/**
+ * v3.7：语音连麦的 ICE 配置（公开信息，无鉴权）。
+ * 只下发 STUN/TURN 地址（TURN 凭据按 TURN 机制本就对玩家可见），**绝不打印 credential**；
+ * 客户端拿它构造 RTCPeerConnection，媒体本身走 P2P、不经过服务器。
+ */
+app.get('/rtc-config', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ iceServers: RTC_ICE_SERVERS });
 });
 
 // 带内容哈希的构建产物：长缓存 + immutable；fallthrough:false 让缺失资源直接 404，
@@ -256,6 +270,21 @@ io.on('connection', (socket) => {
     )
   );
 
+  // v3.7：语音连麦——服务端只同步公开状态、原样转发 WebRTC 信令（不解析 / 不存储）
+  socket.on(
+    'voice:state',
+    handler<VoiceStatePayload, ActionResult<SimpleOk>>((data) =>
+      game.setVoiceState(socket.id, data)
+    )
+  );
+
+  socket.on(
+    'voice:signal',
+    handler<VoiceSignalPayload, ActionResult<VoiceSignalOk>>((data) =>
+      game.relayVoiceSignal(socket.id, data)
+    )
+  );
+
   socket.on(
     'round:agree',
     handler<AgreePayload, ActionResult<AgreeOk>>((data) => game.setAgree(socket.id, data.agree))
@@ -296,6 +325,8 @@ server.listen(PORT, () => {
       '[同声传意] 管理后台未配置 ADMIN_KEY，/admin 将被拒绝（不影响正常游戏；在 .env 或进程环境变量里配置）'
     );
   }
+  // v3.7：只打印数量，**绝不打印 STUN/TURN 凭据**
+  console.log(`[同声传意] 已配置 ${RTC_ICE_SERVERS.length} 个 ICE 服务器`);
 });
 
 let shuttingDown = false;
